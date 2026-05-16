@@ -133,10 +133,7 @@ def open_catalog(
         ImportError: ``engine="duckdb"`` with the extra missing.
     """
     if engine == "memory":
-        cat = from_geoparquet(source)
-        if backend is not None:
-            cat.backend = backend
-        return cat
+        return _memory_engine(source, backend)
     if engine == "duckdb":
         from geocatalog._src.duckdb_backend import DuckDBGeoCatalog
 
@@ -145,11 +142,22 @@ def open_catalog(
     try:
         from geocatalog._src.duckdb_backend import DuckDBGeoCatalog
     except ImportError:
-        cat = from_geoparquet(source)
-        if backend is not None:
-            cat.backend = backend
-        return cat
+        return _memory_engine(source, backend)
     return DuckDBGeoCatalog.open(source, backend=backend, crs=crs)
+
+
+def _memory_engine(
+    source: str | Path, backend: _BACKEND_T | None
+) -> InMemoryGeoCatalog:
+    """Open ``source`` as an `InMemoryGeoCatalog`, applying a backend override.
+
+    Constructs a fresh catalog rather than mutating ``cat.backend`` so
+    the override flows through `InMemoryGeoCatalog.__init__`'s validation.
+    """
+    cat = from_geoparquet(source)
+    if backend is None or backend == cat.backend:
+        return cat
+    return InMemoryGeoCatalog(cat.gdf, backend=backend)
 
 
 _LAZY_ATTRS = {

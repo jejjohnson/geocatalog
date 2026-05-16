@@ -76,7 +76,7 @@ def _xarray_row(
     data_vars: Sequence[str] | None,
     time_var: str,
     target_crs: Any | None,
-) -> dict[str, Any] | None:
+) -> dict[str, Any]:
     if xr is None:
         raise ImportError(
             "build_xarray_catalog requires xarray; install via "
@@ -208,16 +208,15 @@ def build_xarray_catalog(
             n_workers=n_workers,
         )
 
-    rows: list[dict[str, Any]] = []
-    for fp in filepaths:
-        row = _xarray_row(
+    rows: list[dict[str, Any]] = [
+        _xarray_row(
             fp,
             data_vars=data_vars,
             time_var=time_var,
             target_crs=target_crs,
         )
-        if row is not None:
-            rows.append(row)
+        for fp in filepaths
+    ]
     if not rows:
         raise ValueError("build_xarray_catalog: no files yielded a row")
     crs_value = target_crs if target_crs is not None else rows[0]["crs"]

@@ -246,7 +246,15 @@ class StreamingParquetWriter:
         self._writer.write_table(table)
 
     def _build_schema_from_first(self, row: dict[str, Any] | None) -> pa.Schema:
-        """Infer the Arrow schema from the first row (or build a minimal one)."""
+        """Infer the Arrow schema from the first row (or build a minimal one).
+
+        The schema is sealed from the first row's extras keyset; subsequent
+        rows must share the same keys. The current per-backend extractors
+        (`_filepath_to_row`, `_xarray_row`, `_vector_row`) all return a
+        uniform shape, so this holds. If a future extractor returns
+        per-row optional extras, this branch will need to pre-union keys
+        across the first N rows before sealing the schema.
+        """
         # Reserved column order (matches what `to_geoparquet` writes for the
         # InMemory backend — keeps reader code uniform).
         fields: list[pa.Field] = []

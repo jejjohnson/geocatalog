@@ -231,6 +231,12 @@ def build_vector_catalog(
     # then pass that down to subsequent calls so every later file's
     # footprint is reprojected into the catalog's uniform CRS. This is
     # what keeps mixed-CRS archives honest.
+    # Latching precedence: an empty file returns `(None, None)` and
+    # contributes nothing; a non-matching filename with a non-empty file
+    # returns `(None, observed_crs)` and we skip it but DO NOT latch
+    # (we have no row to anchor). Only matched rows seed `effective_crs`.
+    # This keeps the catalog's CRS aligned with the rows it actually
+    # contains, even when leading files are empty or unmatched.
     effective_crs = target_crs
     for fp in filepaths:
         row, observed_crs = _vector_row(
