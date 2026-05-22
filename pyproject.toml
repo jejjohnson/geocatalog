@@ -41,7 +41,17 @@ dependencies = [
     "pyarrow>=14.0",
     # Raster loader uses rasterio for windowed reads and reprojection.
     "rasterio>=1.3",
+    # `geocatalog` console command (#23). Cyclopts is type-annotation
+    # driven, so subcommands compose by adding type-hinted functions to
+    # the App — no Click-style decorator boilerplate.
+    "cyclopts>=2.0",
 ]
+
+[project.scripts]
+# CLI entry point — runs the cyclopts App defined in
+# `geocatalog._cli`. `pip install geocatalog` exposes this as
+# `geocatalog ...` on the user's PATH (#23).
+geocatalog = "geocatalog._cli:app"
 
 [project.optional-dependencies]
 # xarray-backed catalog (`build_xarray_catalog`, `load_xarray`).
