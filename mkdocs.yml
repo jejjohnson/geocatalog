@@ -45,6 +45,7 @@ nav:
   - Concepts:
       - Catalogs: catalogs.md
       - CLI: cli.md
+      - Schema versions: schema-versions.md
   - Tutorials:
       - Catalog intro: notebooks/catalog_intro.ipynb
       - Catalog set algebra: notebooks/catalog_set_algebra.ipynb

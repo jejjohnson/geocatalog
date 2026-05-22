@@ -50,9 +50,11 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
+from geocatalog._src.parquet import SCHEMA_VERSION_CURRENT as _SCHEMA_VERSION
+
+
 _BACKEND_T = Literal["raster", "xarray", "vector"]
 _GEOPARQUET_VERSION = "1.1.0"
-_SCHEMA_VERSION = 0
 
 
 # ---------------------------------------------------------------------------
