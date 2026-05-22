@@ -26,3 +26,13 @@ def test_iter_rows_all(benchmark, medium_catalog) -> None:
         return sum(1 for _ in medium_catalog.iter_rows())
 
     benchmark(_drain)
+
+
+def test_inmemory_10e5(benchmark) -> None:
+    """Walk a 10⁵-row in-memory catalog."""
+    catalog = make_inmemory_catalog(100_000, seed=0)
+
+    def _drain() -> int:
+        return sum(1 for _ in catalog.iter_rows())
+
+    benchmark(_drain)

@@ -243,16 +243,25 @@ class InMemoryGeoCatalog:
         crs = pyproj.CRS.from_user_input(self.gdf.crs)
         reserved = {"geometry", "filepath", "start_time", "end_time"}
         extra_cols = [c for c in self.gdf.columns if c not in reserved]
-        for interval, row in zip(self.gdf.index, self.gdf.itertuples(), strict=True):
-            row_dict = row._asdict()
-            filepath = row_dict.get("filepath")
+        geoms = self.gdf.geometry.to_numpy(copy=False)
+        intervals = self.gdf.index
+        paths = (
+            self.gdf["filepath"].to_numpy(copy=False)
+            if "filepath" in self.gdf.columns
+            else None
+        )
+        extras_data = tuple((c, self.gdf[c].to_numpy(copy=False)) for c in extra_cols)
+        n_rows = len(self.gdf)
+
+        for i in range(n_rows):
+            filepath = paths[i] if paths is not None else None
             if filepath is None:
-                filepath = str(row_dict.get("Index", ""))
-            extras = {c: row_dict[c] for c in extra_cols if c in row_dict}
+                filepath = str(intervals[i])
+            extras = {c: values[i] for c, values in extras_data}
             yield CatalogRow(
                 filepath=str(filepath),
-                geometry=row_dict["geometry"],
-                interval=interval,
+                geometry=geoms[i],
+                interval=intervals[i],
                 crs=crs,
                 extras=extras,
             )

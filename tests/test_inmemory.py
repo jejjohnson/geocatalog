@@ -216,6 +216,64 @@ class TestSetAlgebra:
         assert merged.gdf.crs == two_tile_catalog.gdf.crs
 
 
+class TestIterRows:
+    def test_yields_catalog_rows_in_order(
+        self, two_tile_catalog: InMemoryGeoCatalog
+    ) -> None:
+        rows = list(two_tile_catalog.iter_rows(batch_size=1))
+
+        assert len(rows) == 2
+        for i, row in enumerate(rows):
+            assert row.filepath == two_tile_catalog.gdf["filepath"].iloc[i]
+            assert row.geometry == two_tile_catalog.gdf.geometry.iloc[i]
+            assert row.interval == two_tile_catalog.gdf.index[i]
+            assert row.crs == two_tile_catalog.gdf.crs
+            assert row.extras == {}
+
+    def test_extras_exclude_reserved_columns(self) -> None:
+        catalog = _build(
+            [
+                {
+                    "geometry": shapely.geometry.box(0, 0, 1, 1),
+                    "start_time": pd.Timestamp("2024-01-01"),
+                    "end_time": pd.Timestamp("2024-01-02"),
+                    "filepath": "tile_A.tif",
+                    "sensor": "S2A",
+                    "cloud_pct": 10,
+                },
+                {
+                    "geometry": shapely.geometry.box(1, 1, 2, 2),
+                    "start_time": pd.Timestamp("2024-01-02"),
+                    "end_time": pd.Timestamp("2024-01-03"),
+                    "filepath": "tile_B.tif",
+                    "sensor": "S2B",
+                    "cloud_pct": 20,
+                },
+            ]
+        )
+
+        rows = list(catalog.iter_rows())
+
+        assert rows[0].extras == {"sensor": "S2A", "cloud_pct": 10}
+        assert rows[1].extras == {"sensor": "S2B", "cloud_pct": 20}
+
+    def test_uses_interval_as_filepath_fallback(self) -> None:
+        gdf = gpd.GeoDataFrame(
+            {
+                "geometry": [shapely.geometry.box(0, 0, 1, 1)],
+                "start_time": [pd.Timestamp("2024-01-01")],
+                "end_time": [pd.Timestamp("2024-01-02")],
+            },
+            geometry="geometry",
+            crs="EPSG:32629",
+        )
+        catalog = InMemoryGeoCatalog(gdf, backend="raster")
+
+        row = next(catalog.iter_rows())
+
+        assert row.filepath == str(catalog.gdf.index[0])
+
+
 class TestIterSlices:
     def test_yields_one_per_row(self, two_tile_catalog: InMemoryGeoCatalog) -> None:
         slices = list(two_tile_catalog.iter_slices(resolution=(10.0, 10.0)))
