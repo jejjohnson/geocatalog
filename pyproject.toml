@@ -44,7 +44,17 @@ dependencies = [
     # Structured logging with library-friendly disable/enable semantics
     # (see `_logger.disable("geocatalog")` in `geocatalog/__init__.py`).
     "loguru>=0.7",
+    # `geocatalog` console command (#23). Cyclopts is type-annotation
+    # driven, so subcommands compose by adding type-hinted functions to
+    # the App — no Click-style decorator boilerplate.
+    "cyclopts>=2.0",
 ]
+
+[project.scripts]
+# CLI entry point — runs the cyclopts App defined in
+# `geocatalog._cli`. `pip install geocatalog` exposes this as
+# `geocatalog ...` on the user's PATH (#23).
+geocatalog = "geocatalog._cli:app"
 
 [project.optional-dependencies]
 # xarray-backed catalog (`build_xarray_catalog`, `load_xarray`).

@@ -45,6 +45,7 @@ nav:
   - Concepts:
       - Catalogs: catalogs.md
       - Logging: logging.md
+      - CLI: cli.md
   - Tutorials:
       - Catalog intro: notebooks/catalog_intro.ipynb
       - Catalog set algebra: notebooks/catalog_set_algebra.ipynb
