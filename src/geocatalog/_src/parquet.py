@@ -14,13 +14,14 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import geopandas as gpd
 import pandas as pd
 import pyarrow.parquet as pq
 
 from geocatalog._src.base import CatalogSchemaError
+from geocatalog._src.io import _close_resolved_uri, _resolve_uri
 from geocatalog._src.memory import InMemoryGeoCatalog
 from geocatalog._src.retry import retry_transient_io
 
@@ -50,7 +51,11 @@ _LEGACY_UNVERSIONED: int = 0
 _MIGRATIONS: dict[int, Callable[[gpd.GeoDataFrame], gpd.GeoDataFrame]] = {}
 
 
-def _read_schema_version(path: str | Path) -> int:
+def _read_schema_version(
+    path: str | Path,
+    *,
+    storage_options: dict[str, Any] | None = None,
+) -> int:
     """Return the `_schema_version` recorded in ``path``, without loading rows.
 
     Reads only the `_schema_version` column from the parquet file
@@ -77,7 +82,11 @@ def _read_schema_version(path: str | Path) -> int:
     import pyarrow
 
     try:
-        table = pq.read_table(Path(path), columns=["_schema_version"])
+        resolved = _resolve_uri(path, storage_options=storage_options)
+        try:
+            table = pq.read_table(resolved, columns=["_schema_version"])
+        finally:
+            _close_resolved_uri(resolved)
         version_series = pd.Series(table.column("_schema_version").to_pandas())
     except (KeyError, pyarrow.lib.ArrowInvalid):
         return _LEGACY_UNVERSIONED
@@ -171,7 +180,12 @@ def to_geoparquet(
     )
 
 
-def from_geoparquet(path: str | Path, *, retries: int = 3) -> InMemoryGeoCatalog:
+def from_geoparquet(
+    path: str | Path,
+    *,
+    retries: int = 3,
+    storage_options: dict[str, Any] | None = None,
+) -> InMemoryGeoCatalog:
     """Load a GeoParquet file into an `InMemoryGeoCatalog`.
 
     Inverse of `to_geoparquet`: rebuilds the `IntervalIndex` from
@@ -193,6 +207,9 @@ def from_geoparquet(path: str | Path, *, retries: int = 3) -> InMemoryGeoCatalog
             DuckDB's ``COPY ... TO``, or any GeoParquet 1.x writer.
         retries: Number of retries for transient remote I/O failures.
             ``0`` disables retry/backoff.
+        storage_options: Options forwarded to fsspec for cloud/HTTP URIs
+            (e.g. ``{"anon": True}`` for public S3 buckets). ``None``
+            uses fsspec defaults — set explicitly to override credentials.
 
     Returns:
         An `InMemoryGeoCatalog` with the same rows, CRS, and (where
@@ -205,8 +222,17 @@ def from_geoparquet(path: str | Path, *, retries: int = 3) -> InMemoryGeoCatalog
     # Read the version *first* via a column-selective parquet load so
     # we can reject a v_future / multi-version artifact before paying
     # for the full read.
-    v_artifact = retry_transient_io(_read_schema_version, path, retries=retries)
-    gdf = retry_transient_io(gpd.read_parquet, Path(path), retries=retries)
+    v_artifact = retry_transient_io(
+        _read_schema_version,
+        path,
+        storage_options=storage_options,
+        retries=retries,
+    )
+    resolved = _resolve_uri(path, storage_options=storage_options)
+    try:
+        gdf = retry_transient_io(gpd.read_parquet, resolved, retries=retries)
+    finally:
+        _close_resolved_uri(resolved)
     backend_col = gdf.pop("_backend") if "_backend" in gdf.columns else None
     if "_schema_version" in gdf.columns:
         gdf = gdf.drop(columns=["_schema_version"])

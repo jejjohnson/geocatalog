@@ -31,6 +31,7 @@ from rasterio.merge import merge as rio_merge
 from rasterio.vrt import WarpedVRT
 
 from geocatalog._src.geoslice import GeoSlice
+from geocatalog._src.io import _close_resolved_uri, _resolve_uri, _uri_name
 from geocatalog._src.memory import InMemoryGeoCatalog
 from geocatalog._src.retry import retry_transient_io
 
@@ -69,16 +70,20 @@ def _filepath_to_row(
     date_format: str,
     target_crs: Any | None,
     retries: int = 3,
+    storage_options: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    filepath = Path(filepath)
-    with retry_transient_io(rasterio.open, filepath, retries=retries) as src:
-        if target_crs is None:
-            crs = src.crs
-            bounds = src.bounds
-        else:
-            with WarpedVRT(src, crs=target_crs) as vrt:
-                crs = vrt.crs
-                bounds = vrt.bounds
+    resolved = _resolve_uri(filepath, storage_options=storage_options)
+    try:
+        with retry_transient_io(rasterio.open, resolved, retries=retries) as src:
+            if target_crs is None:
+                crs = src.crs
+                bounds = src.bounds
+            else:
+                with WarpedVRT(src, crs=target_crs) as vrt:
+                    crs = vrt.crs
+                    bounds = vrt.bounds
+    finally:
+        _close_resolved_uri(resolved)
 
     polygon = shapely.geometry.box(bounds.left, bounds.bottom, bounds.right, bounds.top)
 
@@ -89,7 +94,7 @@ def _filepath_to_row(
         start = pd.Timestamp("1900-01-01")
         end = pd.Timestamp("2100-01-01")
     else:
-        match = filename_regex.search(filepath.name)
+        match = filename_regex.search(_uri_name(filepath))
         if match is None:
             log.warning("Skipping {}: filename does not match regex", filepath)
             return None
@@ -127,6 +132,7 @@ def build_raster_catalog(
     batch_size: int = 10_000,
     n_workers: int = 1,
     ordered: bool = False,
+    storage_options: dict[str, Any] | None = None,
 ) -> InMemoryGeoCatalog | DuckDBGeoCatalog:
     """Build a raster catalog — in-memory (default) or streamed to GeoParquet.
 
@@ -226,6 +232,7 @@ def build_raster_catalog(
             batch_size=batch_size,
             n_workers=n_workers,
             ordered=ordered,
+            storage_options=storage_options,
         )
 
     pattern = re.compile(filename_regex) if filename_regex is not None else None
@@ -236,6 +243,7 @@ def build_raster_catalog(
             filename_regex=pattern,
             date_format=date_format,
             target_crs=target_crs,
+            storage_options=storage_options,
         )
         if row is not None:
             rows.append(row)
@@ -259,6 +267,7 @@ def _build_raster_catalog_duckdb(
     batch_size: int,
     n_workers: int,
     ordered: bool,
+    storage_options: dict[str, Any] | None,
 ) -> DuckDBGeoCatalog:
     """Streaming-write branch for `build_raster_catalog`.
 
@@ -280,6 +289,7 @@ def _build_raster_catalog_duckdb(
         filename_regex=pattern,
         date_format=date_format,
         target_crs=target_crs,
+        storage_options=storage_options,
     )
     return stream_build_duckdb(
         filepaths,
@@ -304,6 +314,7 @@ def load_raster(
     merge_method: _RasterMergeMethod = "last",
     nodata: float | None = None,
     retries: int = 3,
+    storage_options: dict[str, Any] | None = None,
 ) -> GeoTensor:
     """Read + mosaic the catalog rows matching ``slice_`` into one `GeoTensor`.
 
@@ -332,6 +343,9 @@ def load_raster(
             respects each source's declared ``_FillValue`` / ``nodata``.
         retries: Number of retries for transient remote I/O failures.
             ``0`` disables retry/backoff.
+        storage_options: Options forwarded to fsspec for cloud/HTTP URIs
+            (e.g. ``{"anon": True}`` for public S3). ``None`` uses fsspec
+            defaults / GDAL's native VSI handling for ``s3://``-style paths.
 
     Returns:
         A `GeoTensor` of shape ``(bands, H, W)`` with ``transform`` and
@@ -358,9 +372,12 @@ def load_raster(
     resampling = resampling or Resampling.bilinear
     sources = []
     handles = []
+    resolved_handles = []
     try:
         for fp in filtered.gdf["filepath"].tolist():
-            src = retry_transient_io(rasterio.open, fp, retries=retries)
+            resolved = _resolve_uri(fp, storage_options=storage_options)
+            resolved_handles.append(resolved)
+            src = retry_transient_io(rasterio.open, resolved, retries=retries)
             handles.append(src)
             sources.append(src)
         target_resolution = slice_.resolution
@@ -377,6 +394,8 @@ def load_raster(
     finally:
         for h in handles:
             h.close()
+        for h in resolved_handles:
+            _close_resolved_uri(h)
 
     return GeoTensor(
         values=merged,
@@ -395,6 +414,7 @@ def load_raster_timeseries(
     nodata: float | None = None,
     n_workers: int = 4,
     on_missing_day: Literal["skip", "raise"] = "skip",
+    storage_options: dict[str, Any] | None = None,
 ) -> GeoTensor:
     """Stack daily mosaics across the slice's interval into ``(time, b, h, w)``.
 
@@ -456,6 +476,7 @@ def load_raster_timeseries(
                 band_indexes=band_indexes,
                 resampling=resampling,
                 nodata=nodata,
+                storage_options=storage_options,
             )
         except ValueError:
             if on_missing_day == "skip":

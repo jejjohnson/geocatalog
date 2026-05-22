@@ -119,6 +119,7 @@ def open_catalog(
     backend: _BACKEND_T | None = None,
     engine: Literal["auto", "memory", "duckdb"] = "auto",
     crs: Any | None = None,
+    storage_options: dict[str, Any] | None = None,
 ) -> GeoCatalog:
     """Open a GeoParquet artifact as a `GeoCatalog`.
 
@@ -147,6 +148,8 @@ def open_catalog(
             installed).
         crs: Optional CRS override; only consulted by the DuckDB engine
             when the artifact doesn't carry one.
+        storage_options: Options forwarded to fsspec when reading cloud
+            URIs through the in-memory engine.
 
     Returns:
         A `GeoCatalog` over ``source``. The concrete class is either
@@ -157,28 +160,46 @@ def open_catalog(
         ImportError: ``engine="duckdb"`` with the extra missing.
     """
     if engine == "memory":
-        return _memory_engine(source, backend)
+        return _memory_engine(source, backend, storage_options=storage_options)
     if engine == "duckdb":
         from geocatalog._src.duckdb_backend import DuckDBGeoCatalog
 
-        return DuckDBGeoCatalog.open(source, backend=backend, crs=crs)
+        return DuckDBGeoCatalog.open(
+            source,
+            backend=backend,
+            crs=crs,
+            storage_options=storage_options,
+        )
     # engine == "auto"
+    if storage_options is not None:
+        return _memory_engine(source, backend, storage_options=storage_options)
     try:
         from geocatalog._src.duckdb_backend import DuckDBGeoCatalog
     except ImportError:
-        return _memory_engine(source, backend)
-    return DuckDBGeoCatalog.open(source, backend=backend, crs=crs)
+        return _memory_engine(source, backend, storage_options=storage_options)
+    try:
+        return DuckDBGeoCatalog.open(
+            source,
+            backend=backend,
+            crs=crs,
+            storage_options=storage_options,
+        )
+    except ImportError:
+        return _memory_engine(source, backend, storage_options=storage_options)
 
 
 def _memory_engine(
-    source: str | Path, backend: _BACKEND_T | None
+    source: str | Path,
+    backend: _BACKEND_T | None,
+    *,
+    storage_options: dict[str, Any] | None = None,
 ) -> InMemoryGeoCatalog:
     """Open ``source`` as an `InMemoryGeoCatalog`, applying a backend override.
 
     Constructs a fresh catalog rather than mutating ``cat.backend`` so
     the override flows through `InMemoryGeoCatalog.__init__`'s validation.
     """
-    cat = from_geoparquet(source)
+    cat = from_geoparquet(source, storage_options=storage_options)
     if backend is None or backend == cat.backend:
         return cat
     return InMemoryGeoCatalog(cat.gdf, backend=backend)

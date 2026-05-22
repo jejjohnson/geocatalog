@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from geocatalog._src.geoslice import GeoSlice
 
 
+from geocatalog._src.io import _close_resolved_uri, _resolve_uri
 from geocatalog._src.memory import InMemoryGeoCatalog
 
 
@@ -55,13 +56,14 @@ def _xy_dims(ds: xr.Dataset) -> tuple[str, str]:
     )
 
 
-def _xarray_engine(filepath: Path) -> str | None:
+def _xarray_engine(filepath: str | Path) -> str | None:
     """Pick the xarray engine for ``filepath``.
 
     Directories and ``.zarr`` paths use the zarr engine; everything else
     falls through to xarray's default (netcdf4 / h5netcdf). Centralised
     so the build + load paths can't disagree.
     """
+    filepath = Path(str(filepath))
     if filepath.suffix == ".zarr" or filepath.is_dir():
         return "zarr"
     return None
@@ -73,39 +75,43 @@ def _xarray_row(
     data_vars: Sequence[str] | None,
     time_var: str,
     target_crs: Any | None,
+    storage_options: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if xr is None:
         raise ImportError(
             "build_xarray_catalog requires xarray; install via "
             "`pip install 'geocatalog[xarray-raster]'`."
         )
-    filepath = Path(filepath)
     engine = _xarray_engine(filepath)
-    with xr.open_dataset(filepath, engine=engine) as ds:
-        x_name, y_name = _xy_dims(ds)
-        xmin, xmax = float(ds[x_name].min()), float(ds[x_name].max())
-        ymin, ymax = float(ds[y_name].min()), float(ds[y_name].max())
-        polygon = shapely.geometry.box(xmin, ymin, xmax, ymax)
+    resolved = _resolve_uri(filepath, storage_options=storage_options)
+    try:
+        with xr.open_dataset(resolved, engine=engine) as ds:
+            x_name, y_name = _xy_dims(ds)
+            xmin, xmax = float(ds[x_name].min()), float(ds[x_name].max())
+            ymin, ymax = float(ds[y_name].min()), float(ds[y_name].max())
+            polygon = shapely.geometry.box(xmin, ymin, xmax, ymax)
 
-        if time_var in ds.coords:
-            times = pd.to_datetime(ds[time_var].values)
-            start = pd.Timestamp(times.min())
-            end = pd.Timestamp(times.max())
-            n_timesteps = int(ds[time_var].size)
-        else:
-            start = pd.Timestamp("1900-01-01")
-            end = pd.Timestamp("2100-01-01")
-            n_timesteps = 0
+            if time_var in ds.coords:
+                times = pd.to_datetime(ds[time_var].values)
+                start = pd.Timestamp(times.min())
+                end = pd.Timestamp(times.max())
+                n_timesteps = int(ds[time_var].size)
+            else:
+                start = pd.Timestamp("1900-01-01")
+                end = pd.Timestamp("2100-01-01")
+                n_timesteps = 0
 
-        # Resolve CRS: rio accessor if rioxarray is loaded, otherwise the
-        # caller's target_crs as a fallback.
-        crs_value = None
-        try:
-            crs_value = ds.rio.crs  # type: ignore[attr-defined]
-        except (AttributeError, ValueError):
+            # Resolve CRS: rio accessor if rioxarray is loaded, otherwise the
+            # caller's target_crs as a fallback.
             crs_value = None
-        if crs_value is None:
-            crs_value = target_crs
+            try:
+                crs_value = ds.rio.crs  # type: ignore[attr-defined]
+            except (AttributeError, ValueError):
+                crs_value = None
+            if crs_value is None:
+                crs_value = target_crs
+    finally:
+        _close_resolved_uri(resolved)
 
     return {
         "filepath": str(filepath),
@@ -132,6 +138,7 @@ def build_xarray_catalog(
     batch_size: int = 10_000,
     n_workers: int = 1,
     ordered: bool = False,
+    storage_options: dict[str, Any] | None = None,
 ) -> InMemoryGeoCatalog | DuckDBGeoCatalog:
     """Build an xarray-shaped catalog — in-memory (default) or streamed.
 
@@ -213,6 +220,7 @@ def build_xarray_catalog(
             batch_size=batch_size,
             n_workers=n_workers,
             ordered=ordered,
+            storage_options=storage_options,
         )
 
     rows: list[dict[str, Any]] = [
@@ -221,6 +229,7 @@ def build_xarray_catalog(
             data_vars=data_vars,
             time_var=time_var,
             target_crs=target_crs,
+            storage_options=storage_options,
         )
         for fp in filepaths
     ]
@@ -249,6 +258,7 @@ def _build_xarray_catalog_duckdb(
     batch_size: int,
     n_workers: int,
     ordered: bool,
+    storage_options: dict[str, Any] | None,
 ) -> DuckDBGeoCatalog:
     """Streaming-write branch for `build_xarray_catalog`.
 
@@ -275,6 +285,7 @@ def _build_xarray_catalog_duckdb(
         data_vars=tuple(data_vars) if data_vars is not None else None,
         time_var=time_var,
         target_crs=target_crs,
+        storage_options=storage_options,
     )
     return stream_build_duckdb(
         filepaths,
@@ -295,6 +306,7 @@ def load_xarray(
     slice_: GeoSlice,
     *,
     data_vars: Sequence[str] | None = None,
+    storage_options: dict[str, Any] | None = None,
 ) -> xr.Dataset:
     """Load + concat the catalog rows matching ``slice_`` into an ``xr.Dataset``.
 
@@ -348,35 +360,41 @@ def load_xarray(
     for fp, row_time_var in zip(
         filtered.gdf["filepath"], filtered.gdf["time_var"], strict=False
     ):
-        engine = _xarray_engine(Path(fp))
-        with xr.open_dataset(fp, engine=engine) as ds:
-            x_name, y_name = _xy_dims(ds)
-            # `.sel(slice)` requires monotonic coords; fall back to `.where`.
-            try:
-                piece = ds.sel({x_name: slice(xmin, xmax), y_name: slice(ymin, ymax)})
-            except KeyError:
-                mask = (
-                    (ds[x_name] >= xmin)
-                    & (ds[x_name] <= xmax)
-                    & (ds[y_name] >= ymin)
-                    & (ds[y_name] <= ymax)
-                )
-                piece = ds.where(mask, drop=True)
-            # Time-clip to the slice interval so multi-year files don't
-            # smuggle in out-of-range timesteps. Files without the time
-            # coord (n_timesteps == 0) pass through.
-            if row_time_var in piece.coords:
+        engine = _xarray_engine(fp)
+        resolved = _resolve_uri(fp, storage_options=storage_options)
+        try:
+            with xr.open_dataset(resolved, engine=engine) as ds:
+                x_name, y_name = _xy_dims(ds)
+                # `.sel(slice)` requires monotonic coords; fall back to `.where`.
                 try:
-                    piece = piece.sel({row_time_var: slice(t_start, t_end)})
-                except KeyError:
-                    t_mask = (piece[row_time_var] >= t_start) & (
-                        piece[row_time_var] <= t_end
+                    piece = ds.sel(
+                        {x_name: slice(xmin, xmax), y_name: slice(ymin, ymax)}
                     )
-                    piece = piece.where(t_mask, drop=True)
-            if data_vars is not None:
-                piece = piece[list(data_vars)]
-            # Materialise so the array survives the `with` block close.
-            pieces.append(piece.load())
+                except KeyError:
+                    mask = (
+                        (ds[x_name] >= xmin)
+                        & (ds[x_name] <= xmax)
+                        & (ds[y_name] >= ymin)
+                        & (ds[y_name] <= ymax)
+                    )
+                    piece = ds.where(mask, drop=True)
+                # Time-clip to the slice interval so multi-year files don't
+                # smuggle in out-of-range timesteps. Files without the time
+                # coord (n_timesteps == 0) pass through.
+                if row_time_var in piece.coords:
+                    try:
+                        piece = piece.sel({row_time_var: slice(t_start, t_end)})
+                    except KeyError:
+                        t_mask = (piece[row_time_var] >= t_start) & (
+                            piece[row_time_var] <= t_end
+                        )
+                        piece = piece.where(t_mask, drop=True)
+                if data_vars is not None:
+                    piece = piece[list(data_vars)]
+                # Materialise so the array survives the `with` block close.
+                pieces.append(piece.load())
+        finally:
+            _close_resolved_uri(resolved)
     if len(pieces) == 1:
         return pieces[0]
     time_var = filtered.gdf["time_var"].iloc[0]

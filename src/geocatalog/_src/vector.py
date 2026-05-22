@@ -23,6 +23,7 @@ from loguru import logger as log
 from rasterio.features import rasterize
 
 from geocatalog._src.geoslice import GeoSlice
+from geocatalog._src.io import _close_resolved_uri, _resolve_uri, _uri_name
 from geocatalog._src.memory import InMemoryGeoCatalog
 
 
@@ -44,6 +45,7 @@ def _vector_row(
     date_format: str,
     target_crs: Any | None,
     layer: str | int | None,
+    storage_options: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, Any]:
     """Build one catalog row from a vector file.
 
@@ -53,12 +55,15 @@ def _vector_row(
     observed CRS to anchor the catalog when no ``target_crs`` was
     provided, then reprojects every subsequent file to that anchor.
     """
-    filepath = Path(filepath)
-    gdf = (
-        gpd.read_file(filepath, layer=layer)
-        if layer is not None
-        else gpd.read_file(filepath)
-    )
+    resolved = _resolve_uri(filepath, storage_options=storage_options)
+    try:
+        gdf = (
+            gpd.read_file(resolved, layer=layer)
+            if layer is not None
+            else gpd.read_file(resolved)
+        )
+    finally:
+        _close_resolved_uri(resolved)
     if gdf.empty:
         log.warning("Skipping empty vector file {}", filepath)
         return None, None
@@ -72,7 +77,7 @@ def _vector_row(
         start = pd.Timestamp("1900-01-01")
         end = pd.Timestamp("2100-01-01")
     else:
-        match = filename_regex.search(filepath.name)
+        match = filename_regex.search(_uri_name(filepath))
         if match is None:
             log.warning("Skipping {}: filename does not match regex", filepath)
             return None, observed_crs
@@ -111,6 +116,7 @@ def _vector_row_for_stream(
     date_format: str,
     target_crs: Any,
     layer: str | int | None,
+    storage_options: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Picklable streaming extractor for the duckdb branch.
 
@@ -126,6 +132,7 @@ def _vector_row_for_stream(
         date_format=date_format,
         target_crs=target_crs,
         layer=layer,
+        storage_options=storage_options,
     )
     return row
 
@@ -144,6 +151,7 @@ def build_vector_catalog(
     batch_size: int = 10_000,
     n_workers: int = 1,
     ordered: bool = False,
+    storage_options: dict[str, Any] | None = None,
 ) -> InMemoryGeoCatalog | DuckDBGeoCatalog:
     """Build a vector catalog — in-memory (default) or streamed to GeoParquet.
 
@@ -229,6 +237,7 @@ def build_vector_catalog(
             batch_size=batch_size,
             n_workers=n_workers,
             ordered=ordered,
+            storage_options=storage_options,
         )
 
     pattern = re.compile(filename_regex) if filename_regex is not None else None
@@ -252,6 +261,7 @@ def build_vector_catalog(
             date_format=date_format,
             target_crs=effective_crs,
             layer=layer,
+            storage_options=storage_options,
         )
         if row is None:
             continue
@@ -277,6 +287,7 @@ def _build_vector_catalog_duckdb(
     batch_size: int,
     n_workers: int,
     ordered: bool,
+    storage_options: dict[str, Any] | None,
 ) -> DuckDBGeoCatalog:
     """Streaming-write branch for `build_vector_catalog`.
 
@@ -299,6 +310,7 @@ def _build_vector_catalog_duckdb(
         date_format=date_format,
         target_crs=target_crs,
         layer=layer,
+        storage_options=storage_options,
     )
     return stream_build_duckdb(
         filepaths,
@@ -322,6 +334,7 @@ def load_vector(
     label_field: str | None = None,
     burn_value: int | None = None,
     fill: int = 0,
+    storage_options: dict[str, Any] | None = None,
 ) -> GeoTensor:
     """Rasterise the catalog's vector rows matching ``slice_`` into a `GeoTensor`.
 
@@ -390,7 +403,15 @@ def load_vector(
     else:
         layers = [None] * len(filtered.gdf)
     for fp, layer in zip(filtered.gdf["filepath"], layers, strict=True):
-        sub = gpd.read_file(fp, layer=layer) if layer is not None else gpd.read_file(fp)
+        resolved = _resolve_uri(fp, storage_options=storage_options)
+        try:
+            sub = (
+                gpd.read_file(resolved, layer=layer)
+                if layer is not None
+                else gpd.read_file(resolved)
+            )
+        finally:
+            _close_resolved_uri(resolved)
         if sub.crs != slice_.crs:
             sub = sub.to_crs(slice_.crs)
         # Clip to the slice bbox.
