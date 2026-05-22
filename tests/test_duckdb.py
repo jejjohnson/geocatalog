@@ -102,13 +102,14 @@ class _CountingRelation:
 
 
 class _CountingConnection:
-    def __init__(self) -> None:
+    def __init__(self, backend: str = "vector") -> None:
+        self.backend = backend
         self.calls = 0
 
     def sql(self, query: str, *, params: dict[str, str]) -> _AggregateResult:
         del query, params
         self.calls += 1
-        return _AggregateResult(pd.DataFrame({"_backend": ["vector"]}))
+        return _AggregateResult(pd.DataFrame({"_backend": [self.backend]}))
 
 
 @pytest.fixture
@@ -432,6 +433,7 @@ class TestCaching:
 
     def test_backend_tag_read_is_cached_per_connection_and_source(self) -> None:
         con = _CountingConnection()
+        other_con = _CountingConnection("xarray")
         duckdb_backend._BACKEND_TAG_CACHE.clear()
 
         first = duckdb_backend._read_backend_tag(
@@ -440,10 +442,19 @@ class TestCaching:
         second = duckdb_backend._read_backend_tag(
             con, "catalog.parquet", default="raster"
         )
+        other_source = duckdb_backend._read_backend_tag(
+            con, "other.parquet", default="raster"
+        )
+        other_connection = duckdb_backend._read_backend_tag(
+            other_con, "catalog.parquet", default="raster"
+        )
 
         assert first == "vector"
         assert second == "vector"
-        assert con.calls == 1
+        assert other_source == "vector"
+        assert other_connection == "xarray"
+        assert con.calls == 2
+        assert other_con.calls == 1
 
 
 class TestSqlEscape:

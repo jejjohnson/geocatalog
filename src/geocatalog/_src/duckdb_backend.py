@@ -27,6 +27,7 @@ from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import urlsplit
+from weakref import WeakKeyDictionary
 
 import geopandas as gpd
 import numpy as np
@@ -55,7 +56,7 @@ except ImportError:  # pragma: no cover - exercised via the [duckdb] extra
 
 
 _BACKEND_T = Literal["raster", "xarray", "vector"]
-_BACKEND_TAG_CACHE: dict[tuple[int, str], _BACKEND_T] = {}
+_BACKEND_TAG_CACHE: WeakKeyDictionary[Any, dict[str, _BACKEND_T]] = WeakKeyDictionary()
 
 
 def _require_duckdb() -> Any:
@@ -831,9 +832,9 @@ def _read_backend_tag(
     don't break the lookup, and narrowed exception handling so genuine
     SQL parse errors aren't silently swallowed as a missing column.
     """
-    key = (id(con), source)
-    if key in _BACKEND_TAG_CACHE:
-        return _BACKEND_TAG_CACHE[key]
+    source_cache = _BACKEND_TAG_CACHE.get(con)
+    if source_cache is not None and source in source_cache:
+        return source_cache[source]
 
     dd = _require_duckdb()
     try:
@@ -843,23 +844,33 @@ def _read_backend_tag(
         ).df()
     except dd.BinderException:
         # Missing `_backend` column — externally produced parquet.
-        _BACKEND_TAG_CACHE[key] = default
+        _cache_backend_tag(con, source, default)
         return default
     except dd.IOException:
         # Unreadable parquet path; caller will hit a clearer error
         # on the next read.
-        _BACKEND_TAG_CACHE[key] = default
+        _cache_backend_tag(con, source, default)
         return default
     if len(df) == 0 or pd.isna(df["_backend"].iloc[0]):
-        _BACKEND_TAG_CACHE[key] = default
+        _cache_backend_tag(con, source, default)
         return default
     tag = str(df["_backend"].iloc[0])
     if tag in ("raster", "xarray", "vector"):
         result = tag  # type: ignore[assignment]
-        _BACKEND_TAG_CACHE[key] = result
+        _cache_backend_tag(con, source, result)
         return result
-    _BACKEND_TAG_CACHE[key] = default
+    _cache_backend_tag(con, source, default)
     return default
+
+
+def _cache_backend_tag(
+    con: duckdb_mod.DuckDBPyConnection, source: str, tag: _BACKEND_T
+) -> None:
+    source_cache = _BACKEND_TAG_CACHE.get(con)
+    if source_cache is None:
+        source_cache = {}
+        _BACKEND_TAG_CACHE[con] = source_cache
+    source_cache[source] = tag
 
 
 def _df_to_inmemory(
