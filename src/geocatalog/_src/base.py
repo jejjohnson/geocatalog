@@ -27,6 +27,17 @@ if TYPE_CHECKING:
     from geocatalog._src.geoslice import GeoSlice
 
 
+class CatalogSchemaError(ValueError):
+    """A GeoParquet artifact has a `_schema_version` the reader can't load.
+
+    Raised when ``_schema_version`` exceeds `SCHEMA_VERSION_CURRENT` (the
+    reader is older than the writer), or when a forward migration is
+    missing for an older artifact. The message identifies the artifact's
+    version and the reader's version so the user can decide whether to
+    upgrade the library or run ``geocatalog migrate``.
+    """
+
+
 @dataclasses.dataclass(frozen=True)
 class CatalogRow:
     """Backend-neutral view of a single catalog row.

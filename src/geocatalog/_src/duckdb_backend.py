@@ -166,6 +166,7 @@ class DuckDBGeoCatalog:
             crs = _read_geoparquet_crs(source, default="EPSG:4326")
         if backend is None:
             backend = _read_backend_tag(con, source_str, default="raster")
+        _check_schema_version(con, source_str)
         # Parameter binding (rather than f-string interpolation) keeps
         # paths containing apostrophes — `s3://bucket/o'malley/cat.parquet`
         # or tmpdirs under a username with one — from breaking the
@@ -677,6 +678,74 @@ def _read_geoparquet_crs(source: str | Path, *, default: str) -> Any:
     if crs_val is None:
         return default
     return pyproj.CRS.from_user_input(crs_val)
+
+
+def _check_schema_version(con: duckdb_mod.DuckDBPyConnection, source: str) -> None:
+    """Raise `CatalogSchemaError` if the artifact's `_schema_version` is unsupported.
+
+    Aggregates the reserved ``_schema_version`` column across *every*
+    shard in the source — `DuckDBGeoCatalog.open` supports directories
+    / globs, so a multi-file source could legitimately mix versions
+    if the user concatenated shards from different library releases.
+    `LIMIT 1` would sample one row and miss the conflict (codex P1).
+
+    Three rejection cases:
+
+    1. ``max(version) > SCHEMA_VERSION_CURRENT`` — the artifact is
+       newer than the reader. User should upgrade `geocatalog`.
+    2. ``min(version) < SCHEMA_VERSION_CURRENT`` — the artifact is
+       older than the reader. The DuckDB backend doesn't materialise
+       the relation through pandas just to migrate; the user should
+       run ``geocatalog migrate`` on the affected file(s).
+    3. ``min(version) != max(version)`` — mixed-version shards. We
+       can't pick which is canonical; the user has to migrate each
+       shard separately or rewrite into one file.
+
+    Ad-hoc parquet files without the column are treated as
+    ``SCHEMA_VERSION_CURRENT`` (no migration needed).
+    """
+    from geocatalog._src.base import CatalogSchemaError
+    from geocatalog._src.parquet import SCHEMA_VERSION_CURRENT
+
+    dd = _require_duckdb()
+    try:
+        df = con.sql(
+            "SELECT MIN(_schema_version) AS lo, MAX(_schema_version) AS hi "
+            "FROM read_parquet($src)",
+            params={"src": source},
+        ).df()
+    except dd.BinderException:
+        # Missing `_schema_version` column — externally produced parquet.
+        return
+    except dd.IOException:
+        # Unreadable parquet path; caller will hit a clearer error
+        # on the next read.
+        return
+    if len(df) == 0 or pd.isna(df["lo"].iloc[0]) or pd.isna(df["hi"].iloc[0]):
+        return
+    lo = int(df["lo"].iloc[0])
+    hi = int(df["hi"].iloc[0])
+    if lo != hi:
+        raise CatalogSchemaError(
+            f"artifact {source} has mixed `_schema_version` values "
+            f"(min={lo}, max={hi}); the DuckDB backend can't open a "
+            "multi-version source. Migrate each shard separately or "
+            "rewrite into one file at a single version."
+        )
+    v_artifact = lo
+    if v_artifact > SCHEMA_VERSION_CURRENT:
+        raise CatalogSchemaError(
+            f"artifact {source} has _schema_version={v_artifact}, "
+            f"exceeds reader v{SCHEMA_VERSION_CURRENT}. "
+            "Upgrade `geocatalog` to read this artifact."
+        )
+    if v_artifact < SCHEMA_VERSION_CURRENT:
+        raise CatalogSchemaError(
+            f"artifact {source} has _schema_version={v_artifact} < reader "
+            f"v{SCHEMA_VERSION_CURRENT}. The DuckDB backend does not run "
+            "forward migrations in-place; bring the artifact up to date with "
+            f"`geocatalog migrate {source} --to-version {SCHEMA_VERSION_CURRENT}`."
+        )
 
 
 def _read_backend_tag(

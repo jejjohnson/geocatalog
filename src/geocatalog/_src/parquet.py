@@ -12,23 +12,117 @@ backends.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
 
 import geopandas as gpd
 import pandas as pd
+import pyarrow.parquet as pq
 
+from geocatalog._src.base import CatalogSchemaError
 from geocatalog._src.memory import InMemoryGeoCatalog
 
 
 _BACKEND_T = Literal["raster", "xarray", "vector"]
 
 
+# The reader's current schema version. Bump on every substantive schema
+# change and add an entry to `_MIGRATIONS` for ``previous → this``.
+SCHEMA_VERSION_CURRENT: int = 0
+
+
+# Artifacts written before `_schema_version` existed as a reserved
+# column are treated as v0 — the schema that was current when the
+# column was introduced. Pinning to a constant (not
+# `SCHEMA_VERSION_CURRENT`) means the next schema bump will still
+# trigger a v0 -> v1 migration on those legacy files, instead of
+# silently skipping it.
+_LEGACY_UNVERSIONED: int = 0
+
+
+# Forward migrations keyed by *source* version. `_MIGRATIONS[k]` takes a
+# v_k gdf and returns a v_(k+1) gdf. The chain
+# ``_MIGRATIONS[v_artifact] ∘ … ∘ _MIGRATIONS[v_current - 1]`` brings an
+# old artifact up to the current version. Empty today (current schema
+# is v0); populate when shipping v1.
+_MIGRATIONS: dict[int, Callable[[gpd.GeoDataFrame], gpd.GeoDataFrame]] = {}
+
+
+def _read_schema_version(path: str | Path) -> int:
+    """Return the `_schema_version` recorded in ``path``, without loading rows.
+
+    Reads only the `_schema_version` column from the parquet file
+    via pyarrow's selective-column reader — avoids loading the
+    geometry / time columns just to inspect the version. Used by
+    `migrate_geoparquet` to cheaply decide whether a rewrite is
+    necessary, and importable for tests.
+
+    Returns:
+        - The unique value in the column when present and consistent
+          across all rows.
+        - `_LEGACY_UNVERSIONED` (0) when the column is absent (file
+          predates the column's introduction).
+
+    Raises:
+        CatalogSchemaError: If the column exists but holds null/NaN,
+            or holds different versions across rows (mixed-shard
+            artifact — the reader can't decide which is canonical).
+    """
+    # `_schema_version` may not exist in pre-versioning artifacts.
+    # pyarrow raises either ArrowInvalid (selective read) or KeyError
+    # (column lookup) — catch both so the absence is transparently
+    # treated as "legacy v0".
+    import pyarrow
+
+    try:
+        table = pq.read_table(Path(path), columns=["_schema_version"])
+        version_series = pd.Series(table.column("_schema_version").to_pandas())
+    except (KeyError, pyarrow.lib.ArrowInvalid):
+        return _LEGACY_UNVERSIONED
+    if len(version_series) == 0:
+        return _LEGACY_UNVERSIONED
+    if version_series.isna().any():
+        raise CatalogSchemaError(
+            f"artifact {path} has null values in `_schema_version`; "
+            "the column must be populated on every row."
+        )
+    unique = version_series.unique()
+    if len(unique) > 1:
+        raise CatalogSchemaError(
+            f"artifact {path} has mixed `_schema_version` values "
+            f"{sorted(map(int, unique))}; the reader can't open a "
+            "multi-version source. Migrate each shard separately, "
+            "or rewrite into one file at a single version."
+        )
+    return int(unique[0])
+
+
+def _apply_migrations(gdf: gpd.GeoDataFrame, *, from_version: int) -> gpd.GeoDataFrame:
+    """Chain forward migrations from `from_version` to `SCHEMA_VERSION_CURRENT`.
+
+    Raises:
+        CatalogSchemaError: If a migration is missing for any version in
+            the chain — that's a library bug (someone bumped
+            `SCHEMA_VERSION_CURRENT` without registering the migration).
+    """
+    for v in range(from_version, SCHEMA_VERSION_CURRENT):
+        migration = _MIGRATIONS.get(v)
+        if migration is None:
+            raise CatalogSchemaError(
+                f"missing migration v{v} -> v{v + 1}; this is a library bug — "
+                "`SCHEMA_VERSION_CURRENT` was bumped without registering "
+                "the corresponding entry in `_MIGRATIONS`."
+            )
+        gdf = migration(gdf)
+    return gdf
+
+
 def to_geoparquet(
     catalog: InMemoryGeoCatalog,
     path: str | Path,
     *,
-    schema_version: int = 0,
+    schema_version: int = SCHEMA_VERSION_CURRENT,
     write_covering_bbox: bool = True,
 ) -> None:
     """Persist ``catalog`` as a GeoParquet file on disk.
@@ -56,7 +150,8 @@ def to_geoparquet(
         path: Destination path. The ``.parquet`` extension is
             conventional. Any parent directory must exist.
         schema_version: Value written to the reserved
-            ``_schema_version`` column. Default 0.
+            ``_schema_version`` column. Defaults to
+            `SCHEMA_VERSION_CURRENT` (today: 0).
         write_covering_bbox: Emit the per-row ``bbox`` covering struct
             that GeoParquet 1.1 readers (DuckDB, geopandas ≥0.14) use
             for predicate pushdown. Default True; turn off only if a
@@ -84,6 +179,14 @@ def from_geoparquet(path: str | Path) -> InMemoryGeoCatalog:
     (no ``_backend`` column) default to backend ``"raster"`` — adjust
     on the returned catalog if that's wrong.
 
+    The reserved ``_schema_version`` column drives forward migration
+    (see `SCHEMA_VERSION_CURRENT` and `_MIGRATIONS`):
+
+    - ``v_artifact == v_current``: load directly.
+    - ``v_artifact <  v_current``: chain forward migrations transparently.
+    - ``v_artifact >  v_current``: raise `CatalogSchemaError` — the
+      reader is older than the writer and needs upgrading.
+
     Args:
         path: Path to a GeoParquet file produced by `to_geoparquet`,
             DuckDB's ``COPY ... TO``, or any GeoParquet 1.x writer.
@@ -91,11 +194,27 @@ def from_geoparquet(path: str | Path) -> InMemoryGeoCatalog:
     Returns:
         An `InMemoryGeoCatalog` with the same rows, CRS, and (where
         recoverable) backend tag as the source.
+
+    Raises:
+        CatalogSchemaError: If the artifact's `_schema_version` exceeds
+            `SCHEMA_VERSION_CURRENT`.
     """
+    # Read the version *first* via a column-selective parquet load so
+    # we can reject a v_future / multi-version artifact before paying
+    # for the full read.
+    v_artifact = _read_schema_version(path)
     gdf = gpd.read_parquet(Path(path))
     backend_col = gdf.pop("_backend") if "_backend" in gdf.columns else None
     if "_schema_version" in gdf.columns:
         gdf = gdf.drop(columns=["_schema_version"])
+    if v_artifact > SCHEMA_VERSION_CURRENT:
+        raise CatalogSchemaError(
+            f"artifact {Path(path)} has _schema_version={v_artifact}, "
+            f"exceeds reader v{SCHEMA_VERSION_CURRENT}. "
+            "Upgrade `geocatalog` to read this artifact."
+        )
+    if v_artifact < SCHEMA_VERSION_CURRENT:
+        gdf = _apply_migrations(gdf, from_version=v_artifact)
     if "start_time" in gdf.columns and "end_time" in gdf.columns:
         idx = pd.IntervalIndex.from_arrays(
             gdf.pop("start_time"),
@@ -109,3 +228,42 @@ def from_geoparquet(path: str | Path) -> InMemoryGeoCatalog:
     else:
         backend = "raster"
     return InMemoryGeoCatalog(gdf, backend=backend)
+
+
+def migrate_geoparquet(source: str | Path, *, to_version: int) -> int:
+    """Read ``source``, migrate it to ``to_version``, write back in-place.
+
+    A thin file-level wrapper over `from_geoparquet` + `to_geoparquet`
+    used by the ``geocatalog migrate`` CLI. The artifact is rewritten
+    only if the migration actually changed the version, so calling
+    twice is idempotent.
+
+    Args:
+        source: GeoParquet file to migrate. Rewritten in-place.
+        to_version: Target version. Must equal `SCHEMA_VERSION_CURRENT`
+            today (forward-only migrations); kept as an explicit
+            parameter so future versions can target a pinned schema.
+
+    Returns:
+        The artifact's `_schema_version` *before* the migration. Equal
+        to ``to_version`` for already-current files.
+
+    Raises:
+        CatalogSchemaError: If ``to_version`` differs from
+            `SCHEMA_VERSION_CURRENT`.
+    """
+    if to_version != SCHEMA_VERSION_CURRENT:
+        raise CatalogSchemaError(
+            f"migrate target v{to_version} differs from reader "
+            f"v{SCHEMA_VERSION_CURRENT}; only forward migrations to the "
+            "current version are supported."
+        )
+    path = Path(source)
+    # Cheap version probe via column-selective parquet read — avoids
+    # materialising the full gdf just to decide we don't need to.
+    from_version = _read_schema_version(path)
+    if from_version == to_version:
+        return from_version
+    cat = from_geoparquet(path)
+    to_geoparquet(cat, path, schema_version=to_version)
+    return from_version
