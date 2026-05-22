@@ -230,7 +230,7 @@ class TestIterRows:
             assert row.crs == two_tile_catalog.gdf.crs
             assert row.extras == {}
 
-    def test_extras_exclude_reserved_columns(self) -> None:
+    def test_extras_include_only_non_reserved_columns(self) -> None:
         catalog = _build(
             [
                 {

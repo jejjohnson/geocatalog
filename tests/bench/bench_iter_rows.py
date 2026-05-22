@@ -28,7 +28,7 @@ def test_iter_rows_all(benchmark, medium_catalog) -> None:
     benchmark(_drain)
 
 
-def test_inmemory_1e5(benchmark) -> None:
+def test_inmemory_100k(benchmark) -> None:
     """Walk a 100k-row in-memory catalog."""
     catalog = make_inmemory_catalog(100_000, seed=0)
 

@@ -251,13 +251,14 @@ class InMemoryGeoCatalog:
             else None
         )
         extras_data = {c: self.gdf[c].to_numpy(copy=False) for c in extra_cols}
+        extras_items = tuple(extras_data.items())
         n_rows = len(self.gdf)
 
         for i in range(n_rows):
             filepath = paths[i] if paths is not None else None
             if filepath is None:
                 filepath = str(intervals[i])
-            extras = {c: values[i] for c, values in extras_data.items()}
+            extras = {c: values[i] for c, values in extras_items}
             yield CatalogRow(
                 filepath=str(filepath),
                 geometry=geoms[i],
