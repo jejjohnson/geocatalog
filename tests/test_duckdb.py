@@ -183,13 +183,16 @@ class TestLifecycle:
 
     def test_close_on_derived_catalog_is_noop(self, parquet_two_tiles: Path) -> None:
         duck = DuckDBGeoCatalog.open(parquet_two_tiles)
-        filtered = duck.query(bounds=(0, 0, 50, 50), crs="EPSG:32629")
+        try:
+            filtered = duck.query(bounds=(0, 0, 50, 50), crs="EPSG:32629")
 
-        filtered.close()
+            filtered.close()
 
-        assert duck.con is not None
-        assert len(duck) == 2
-        assert len(filtered) == 1
+            assert duck.con is not None
+            assert len(duck) == 2
+            assert len(filtered) == 1
+        finally:
+            duck.close()
 
     def test_closing_parent_invalidates_derived_catalog(
         self, parquet_two_tiles: Path
@@ -200,7 +203,7 @@ class TestLifecycle:
         duck.close()
 
         assert duck.con is None
-        with pytest.raises(duckdb.ConnectionException):
+        with pytest.raises(duckdb.ConnectionException, match="closed"):
             len(filtered)
 
 
