@@ -78,7 +78,13 @@ def _ensure_spatial(con: duckdb_mod.DuckDBPyConnection) -> None:
 
 
 def _scheme(source: str | Path) -> str | None:
-    """Return the lowercase URI scheme for ``source``, or ``None`` for paths."""
+    """Return the lowercase URI scheme for ``source``, or ``None`` for paths.
+
+    Examples:
+        ``s3://bucket/cat.parquet`` returns ``"s3"``.
+        ``Path("cat.parquet")`` returns ``None``.
+        ``"C:/data/cat.parquet"`` returns ``None``.
+    """
     if isinstance(source, Path):
         return None
     if (

@@ -4,12 +4,15 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
 
 import pytest
 
 import geocatalog._src.duckdb_backend as duckdb_backend
 from geocatalog import DuckDBGeoCatalog
+
+
+class _FakeRelation:
+    pass
 
 
 class _FakeConnection:
@@ -19,8 +22,8 @@ class _FakeConnection:
     def execute(self, command: str) -> None:
         self.commands.append(command)
 
-    def sql(self, query: str, *, params: dict[str, str]) -> object:
-        return object()
+    def sql(self, query: str, *, params: dict[str, str]) -> _FakeRelation:
+        return _FakeRelation()
 
 
 @pytest.fixture
@@ -92,9 +95,10 @@ def test_open_loads_extension_for_supported_uri_schemes(
 ) -> None:
     captured_source: list[str] = []
 
-    def fake_sql(query: str, *, params: dict[str, str]) -> Any:
+    def fake_sql(query: str, *, params: dict[str, str]) -> _FakeRelation:
+        assert query == "SELECT * FROM read_parquet($src)"
         captured_source.append(params["src"])
-        return object()
+        return _FakeRelation()
 
     monkeypatch.setattr(fake_duckdb, "sql", fake_sql)
 
