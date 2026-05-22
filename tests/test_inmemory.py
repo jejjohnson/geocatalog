@@ -220,7 +220,7 @@ class TestIterRows:
     def test_yields_catalog_rows_in_order(
         self, two_tile_catalog: InMemoryGeoCatalog
     ) -> None:
-        rows = list(two_tile_catalog.iter_rows(batch_size=1))
+        rows = list(two_tile_catalog.iter_rows())
 
         assert len(rows) == 2
         for i, row in enumerate(rows):

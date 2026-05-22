@@ -29,7 +29,7 @@ def test_iter_rows_all(benchmark, medium_catalog) -> None:
 
 
 def test_inmemory_1e5(benchmark) -> None:
-    """Walk a 10⁵-row in-memory catalog."""
+    """Walk a 100k-row in-memory catalog."""
     catalog = make_inmemory_catalog(100_000, seed=0)
 
     def _drain() -> int:
