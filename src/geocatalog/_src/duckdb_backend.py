@@ -198,7 +198,8 @@ class DuckDBGeoCatalog:
             dd = _require_duckdb()
             raise dd.ConnectionException(
                 "Cannot perform operation: DuckDBGeoCatalog connection has been "
-                "closed. Create a new catalog or use an existing open connection."
+                "closed. Open a new catalog, or keep the parent catalog open when "
+                "using derived catalogs."
             )
         return con
 
