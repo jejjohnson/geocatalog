@@ -67,9 +67,15 @@ jobs:
             -q
 
       - name: Stage baseline for comparison
+        # pytest-benchmark 5.x stores files as
+        # `.benchmarks/<machine>/0001_baseline.json`. Copy the whole
+        # tree (machine subdir + JSON) into the PR checkout so the
+        # next `pytest` invocation discovers it.
         run: |
           mkdir -p pr/.benchmarks
           cp -r base/.benchmarks/* pr/.benchmarks/
+          # Show what's there so a CI debug pass can confirm structure.
+          find pr/.benchmarks -type f
 
       - name: Install (PR)
         working-directory: pr
@@ -77,9 +83,12 @@ jobs:
 
       - name: Run PR benches against baseline (fails on >30% regression)
         working-directory: pr
+        # `--benchmark-compare=0001` matches by numeric ID rather than
+        # glob — pytest-benchmark 5.x's `--benchmark-compare=baseline`
+        # (suffix match) didn't reliably resolve in CI.
         run: |
           uv run pytest tests/bench --benchmark-only --no-cov \
-            --benchmark-compare=baseline \
+            --benchmark-compare=0001 \
             --benchmark-compare-fail=mean:30% \
             -q
 
