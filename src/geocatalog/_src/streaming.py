@@ -48,7 +48,6 @@ if TYPE_CHECKING:
 
 from loguru import logger as log
 
-
 from geocatalog._src.parquet import SCHEMA_VERSION_CURRENT as _SCHEMA_VERSION
 
 

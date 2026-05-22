@@ -18,6 +18,7 @@ from typing import Literal
 
 import geopandas as gpd
 import pandas as pd
+import pyarrow.parquet as pq
 
 from geocatalog._src.base import CatalogSchemaError
 from geocatalog._src.memory import InMemoryGeoCatalog
@@ -31,12 +32,70 @@ _BACKEND_T = Literal["raster", "xarray", "vector"]
 SCHEMA_VERSION_CURRENT: int = 0
 
 
+# Artifacts written before `_schema_version` existed as a reserved
+# column are treated as v0 — the schema that was current when the
+# column was introduced. Pinning to a constant (not
+# `SCHEMA_VERSION_CURRENT`) means the next schema bump will still
+# trigger a v0 -> v1 migration on those legacy files, instead of
+# silently skipping it.
+_LEGACY_UNVERSIONED: int = 0
+
+
 # Forward migrations keyed by *source* version. `_MIGRATIONS[k]` takes a
 # v_k gdf and returns a v_(k+1) gdf. The chain
 # ``_MIGRATIONS[v_artifact] ∘ … ∘ _MIGRATIONS[v_current - 1]`` brings an
 # old artifact up to the current version. Empty today (current schema
 # is v0); populate when shipping v1.
 _MIGRATIONS: dict[int, Callable[[gpd.GeoDataFrame], gpd.GeoDataFrame]] = {}
+
+
+def _read_schema_version(path: str | Path) -> int:
+    """Return the `_schema_version` recorded in ``path``, without loading rows.
+
+    Reads only the `_schema_version` column from the parquet file
+    via pyarrow's selective-column reader — avoids loading the
+    geometry / time columns just to inspect the version. Used by
+    `migrate_geoparquet` to cheaply decide whether a rewrite is
+    necessary, and importable for tests.
+
+    Returns:
+        - The unique value in the column when present and consistent
+          across all rows.
+        - `_LEGACY_UNVERSIONED` (0) when the column is absent (file
+          predates the column's introduction).
+
+    Raises:
+        CatalogSchemaError: If the column exists but holds null/NaN,
+            or holds different versions across rows (mixed-shard
+            artifact — the reader can't decide which is canonical).
+    """
+    # `_schema_version` may not exist in pre-versioning artifacts.
+    # pyarrow raises either ArrowInvalid (selective read) or KeyError
+    # (column lookup) — catch both so the absence is transparently
+    # treated as "legacy v0".
+    import pyarrow
+
+    try:
+        table = pq.read_table(Path(path), columns=["_schema_version"])
+        version_series = pd.Series(table.column("_schema_version").to_pandas())
+    except (KeyError, pyarrow.lib.ArrowInvalid):
+        return _LEGACY_UNVERSIONED
+    if len(version_series) == 0:
+        return _LEGACY_UNVERSIONED
+    if version_series.isna().any():
+        raise CatalogSchemaError(
+            f"artifact {path} has null values in `_schema_version`; "
+            "the column must be populated on every row."
+        )
+    unique = version_series.unique()
+    if len(unique) > 1:
+        raise CatalogSchemaError(
+            f"artifact {path} has mixed `_schema_version` values "
+            f"{sorted(map(int, unique))}; the reader can't open a "
+            "multi-version source. Migrate each shard separately, "
+            "or rewrite into one file at a single version."
+        )
+    return int(unique[0])
 
 
 def _apply_migrations(gdf: gpd.GeoDataFrame, *, from_version: int) -> gpd.GeoDataFrame:
@@ -91,7 +150,8 @@ def to_geoparquet(
         path: Destination path. The ``.parquet`` extension is
             conventional. Any parent directory must exist.
         schema_version: Value written to the reserved
-            ``_schema_version`` column. Default 0.
+            ``_schema_version`` column. Defaults to
+            `SCHEMA_VERSION_CURRENT` (today: 0).
         write_covering_bbox: Emit the per-row ``bbox`` covering struct
             that GeoParquet 1.1 readers (DuckDB, geopandas ≥0.14) use
             for predicate pushdown. Default True; turn off only if a
@@ -139,18 +199,14 @@ def from_geoparquet(path: str | Path) -> InMemoryGeoCatalog:
         CatalogSchemaError: If the artifact's `_schema_version` exceeds
             `SCHEMA_VERSION_CURRENT`.
     """
+    # Read the version *first* via a column-selective parquet load so
+    # we can reject a v_future / multi-version artifact before paying
+    # for the full read.
+    v_artifact = _read_schema_version(path)
     gdf = gpd.read_parquet(Path(path))
     backend_col = gdf.pop("_backend") if "_backend" in gdf.columns else None
     if "_schema_version" in gdf.columns:
-        version_col = gdf.pop("_schema_version")
-        v_artifact = (
-            int(version_col.iloc[0]) if len(version_col) > 0 else SCHEMA_VERSION_CURRENT
-        )
-    else:
-        # Pre-versioning artifacts are treated as v0 — that's where the
-        # `_schema_version` column was introduced, and the schema today
-        # is v0, so no migration is required.
-        v_artifact = SCHEMA_VERSION_CURRENT
+        gdf = gdf.drop(columns=["_schema_version"])
     if v_artifact > SCHEMA_VERSION_CURRENT:
         raise CatalogSchemaError(
             f"artifact {Path(path)} has _schema_version={v_artifact}, "
@@ -203,12 +259,9 @@ def migrate_geoparquet(source: str | Path, *, to_version: int) -> int:
             "current version are supported."
         )
     path = Path(source)
-    gdf_raw = gpd.read_parquet(path)
-    from_version = (
-        int(gdf_raw["_schema_version"].iloc[0])
-        if "_schema_version" in gdf_raw.columns and len(gdf_raw) > 0
-        else SCHEMA_VERSION_CURRENT
-    )
+    # Cheap version probe via column-selective parquet read — avoids
+    # materialising the full gdf just to decide we don't need to.
+    from_version = _read_schema_version(path)
     if from_version == to_version:
         return from_version
     cat = from_geoparquet(path)
