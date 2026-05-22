@@ -79,7 +79,11 @@ def _ensure_spatial(con: duckdb_mod.DuckDBPyConnection) -> None:
 
 def _scheme(source: str | Path) -> str | None:
     """Return the lowercase URI scheme for ``source``, or ``None`` for paths."""
-    scheme = urlsplit(str(source)).scheme
+    if isinstance(source, Path):
+        return None
+    if len(source) >= 3 and source[1] == ":" and source[2] in ("/", "\\"):
+        return None
+    scheme = urlsplit(source).scheme
     return scheme.lower() if scheme else None
 
 

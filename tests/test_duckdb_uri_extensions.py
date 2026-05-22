@@ -19,7 +19,8 @@ class _FakeConnection:
     def execute(self, command: str) -> None:
         self.commands.append(command)
 
-    def sql(self, _query: str, *, params: dict[str, str]) -> object:
+    def sql(self, query: str, *, params: dict[str, str]) -> object:
+        _ = query
         return object()
 
 
@@ -58,6 +59,10 @@ def fake_duckdb(monkeypatch: pytest.MonkeyPatch) -> _FakeConnection:
         ("HTTPS://example.test/cat.parquet", "https"),
         ("az://container/cat.parquet", "az"),
         (Path("cat.parquet"), None),
+        ("", None),
+        ("://missing-scheme", None),
+        ("C:/data/cat.parquet", None),
+        ("C:\\data\\cat.parquet", None),
     ],
 )
 def test_scheme(source: str | Path, scheme: str | None) -> None:
@@ -88,7 +93,8 @@ def test_open_loads_extension_for_supported_uri_schemes(
 ) -> None:
     captured_source: list[str] = []
 
-    def fake_sql(_query: str, *, params: dict[str, str]) -> Any:
+    def fake_sql(query: str, *, params: dict[str, str]) -> Any:
+        _ = query
         captured_source.append(params["src"])
         return object()
 
