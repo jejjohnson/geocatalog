@@ -55,6 +55,7 @@ except ImportError:  # pragma: no cover - exercised via the [duckdb] extra
 
 
 _BACKEND_T = Literal["raster", "xarray", "vector"]
+_BACKEND_TAG_CACHE: dict[tuple[int, str], _BACKEND_T] = {}
 
 
 def _require_duckdb() -> Any:
@@ -538,7 +539,7 @@ class DuckDBGeoCatalog:
 
     # ── properties + persistence ─────────────────────────────────────────
 
-    @property
+    @cached_property
     def total_bounds(self) -> tuple[float, float, float, float]:
         """Union bbox over the relation — one SQL aggregate, not a scan.
 
@@ -546,14 +547,14 @@ class DuckDBGeoCatalog:
             ``(xmin, ymin, xmax, ymax)`` in catalog-CRS units. Four
             NaNs for an empty catalog.
         """
-        if len(self) == 0:
-            return (np.nan, np.nan, np.nan, np.nan)
         df = self.relation.aggregate(
             "MIN(ST_XMin(geometry)) AS xmin, "
             "MIN(ST_YMin(geometry)) AS ymin, "
             "MAX(ST_XMax(geometry)) AS xmax, "
             "MAX(ST_YMax(geometry)) AS ymax"
         ).df()
+        if len(df) == 0 or pd.isna(df["xmin"].iloc[0]):
+            return (np.nan, np.nan, np.nan, np.nan)
         return (
             float(df["xmin"].iloc[0]),
             float(df["ymin"].iloc[0]),
@@ -561,7 +562,7 @@ class DuckDBGeoCatalog:
             float(df["ymax"].iloc[0]),
         )
 
-    @property
+    @cached_property
     def temporal_extent(self) -> pd.Interval:
         """Tightest interval over the relation — one SQL aggregate.
 
@@ -569,11 +570,11 @@ class DuckDBGeoCatalog:
             ``pd.Interval(min(start_time), max(end_time), closed='both')``.
             Both endpoints are ``pd.NaT`` for an empty catalog.
         """
-        if len(self) == 0:
-            return pd.Interval(pd.NaT, pd.NaT, closed="both")
         df = self.relation.aggregate(
             "MIN(start_time) AS tmin, MAX(end_time) AS tmax"
         ).df()
+        if len(df) == 0 or pd.isna(df["tmin"].iloc[0]):
+            return pd.Interval(pd.NaT, pd.NaT, closed="both")
         return pd.Interval(
             pd.Timestamp(df["tmin"].iloc[0]),
             pd.Timestamp(df["tmax"].iloc[0]),
@@ -632,10 +633,15 @@ class DuckDBGeoCatalog:
             backend=self.backend,
         )
 
-    def __len__(self) -> int:
+    @cached_property
+    def _len_cached(self) -> int:
         """Number of rows — runs one COUNT(*) query."""
         df = self.relation.aggregate("COUNT(*) AS n").df()
         return int(df["n"].iloc[0])
+
+    def __len__(self) -> int:
+        """Number of rows — cached after one COUNT(*) query."""
+        return self._len_cached
 
     def __repr__(self) -> str:
         return (
@@ -825,6 +831,10 @@ def _read_backend_tag(
     don't break the lookup, and narrowed exception handling so genuine
     SQL parse errors aren't silently swallowed as a missing column.
     """
+    key = (id(con), source)
+    if key in _BACKEND_TAG_CACHE:
+        return _BACKEND_TAG_CACHE[key]
+
     dd = _require_duckdb()
     try:
         df = con.sql(
@@ -833,16 +843,22 @@ def _read_backend_tag(
         ).df()
     except dd.BinderException:
         # Missing `_backend` column — externally produced parquet.
+        _BACKEND_TAG_CACHE[key] = default
         return default
     except dd.IOException:
         # Unreadable parquet path; caller will hit a clearer error
         # on the next read.
+        _BACKEND_TAG_CACHE[key] = default
         return default
     if len(df) == 0 or pd.isna(df["_backend"].iloc[0]):
+        _BACKEND_TAG_CACHE[key] = default
         return default
     tag = str(df["_backend"].iloc[0])
     if tag in ("raster", "xarray", "vector"):
-        return tag  # type: ignore[return-value]
+        result = tag  # type: ignore[assignment]
+        _BACKEND_TAG_CACHE[key] = result
+        return result
+    _BACKEND_TAG_CACHE[key] = default
     return default
 
 

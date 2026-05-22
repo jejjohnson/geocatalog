@@ -13,6 +13,7 @@ DuckDB backend (same Protocol, different store).
 from __future__ import annotations
 
 from collections.abc import Iterator
+from functools import cached_property
 from typing import Any, Literal
 
 import geopandas as gpd
@@ -78,7 +79,7 @@ class InMemoryGeoCatalog:
         self.gdf = gdf
         self.backend = backend
 
-    @property
+    @cached_property
     def total_bounds(self) -> tuple[float, float, float, float]:
         """Union bbox over all rows.
 
@@ -90,7 +91,7 @@ class InMemoryGeoCatalog:
             return (np.nan, np.nan, np.nan, np.nan)
         return tuple(self.gdf.total_bounds.tolist())  # type: ignore[return-value]
 
-    @property
+    @cached_property
     def temporal_extent(self) -> pd.Interval:
         """Tightest interval spanning every row's time window.
 
