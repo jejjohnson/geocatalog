@@ -78,6 +78,10 @@ dev = [
     # Property-based testing — fuzzes roundtrip / CRS-invariance /
     # intersect-symmetry invariants over arbitrary valid catalogs.
     "hypothesis>=6.100",
+    # Microbenchmarks + CI regression gate (#21). Stays in [dev] so the
+    # base install is unaffected; the bench suite is opt-in via
+    # `pytest tests/bench --benchmark-only`.
+    "pytest-benchmark>=4.0",
 ]
 lint = [
     "ruff>=0.15.11",
@@ -156,7 +160,16 @@ unresolved-attribute = "ignore"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "--cov=src/geocatalog --cov-report=term-missing --cov-report=xml:coverage.xml"
+# `bench_*.py` is the benchmark-suite convention (#21); the default
+# `test_*.py` discovery doesn't pick them up, so opt them in
+# explicitly. Regular `pytest` runs still skip the suite via
+# `--ignore=tests/bench` in `addopts`.
+python_files = ["test_*.py", "bench_*.py"]
+# The bench suite under `tests/bench/` is opt-in: regular `pytest` runs
+# skip it (otherwise every CI run would pay the warmup + repeated-call
+# cost). Invoke explicitly with
+# ``uv run pytest tests/bench --benchmark-only``.
+addopts = "--cov=src/geocatalog --cov-report=term-missing --cov-report=xml:coverage.xml --ignore=tests/bench"
 
 [tool.coverage.run]
 source = ["src/geocatalog"]

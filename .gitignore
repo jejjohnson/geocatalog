@@ -117,3 +117,6 @@ venv.bak/
 
 # Plans (tracked via GitHub issues, not committed)
 .plans/
+
+# pytest-benchmark stash (locally produced; tracked via CI artifact)
+.benchmarks/

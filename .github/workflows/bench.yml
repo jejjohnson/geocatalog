@@ -1,0 +1,98 @@
+name: Bench
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  # On a PR, run the bench suite twice: once on the PR head, once on
+  # main. Compare the two JSON outputs with pytest-benchmark's built-in
+  # `--benchmark-compare-fail` gate — fails the build if any tracked
+  # benchmark regresses by more than 30% (mean), which absorbs the
+  # ~10–15% noise typical of shared GitHub Actions runners.
+  bench-regression:
+    name: bench-quick (PR regression gate)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out PR head
+        uses: actions/checkout@v6
+        with:
+          path: pr
+
+      - name: Check out main as baseline
+        uses: actions/checkout@v6
+        with:
+          ref: main
+          path: base
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install (baseline)
+        working-directory: base
+        run: uv sync --all-extras --group dev
+
+      - name: Run baseline benches
+        working-directory: base
+        # `--benchmark-save=baseline` writes JSON into
+        # `base/.benchmarks/<machine>/baseline_*.json` for the comparison
+        # step below to read.
+        run: |
+          uv run pytest tests/bench --benchmark-only --no-cov \
+            --benchmark-save=baseline \
+            -q
+
+      - name: Stage baseline for comparison
+        run: |
+          mkdir -p pr/.benchmarks
+          cp -r base/.benchmarks/* pr/.benchmarks/
+
+      - name: Install (PR)
+        working-directory: pr
+        run: uv sync --all-extras --group dev
+
+      - name: Run PR benches against baseline (fails on >30% regression)
+        working-directory: pr
+        run: |
+          uv run pytest tests/bench --benchmark-only --no-cov \
+            --benchmark-compare=baseline \
+            --benchmark-compare-fail=mean:30% \
+            -q
+
+  # On push-to-main, just run the suite and upload the JSON as a build
+  # artifact so the next PR's compare-against-main step has data even
+  # when its commit is older than the action's retention window.
+  bench-full:
+    name: bench-full (main baseline)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --all-extras --group dev
+
+      - name: Run full bench suite
+        run: |
+          uv run pytest tests/bench --benchmark-only --no-cov \
+            --benchmark-save=main \
+            -q
+
+      - name: Upload bench JSON
+        uses: actions/upload-artifact@v7
+        with:
+          name: benchmark-main
+          path: .benchmarks/
+          retention-days: 90
