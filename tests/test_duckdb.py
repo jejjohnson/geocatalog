@@ -97,7 +97,11 @@ class _CountingRelation:
     def filter(self, where: str) -> _CountingRelation:
         self.filter_calls.append(where)
         if self.filter_return_value is None:
-            self.filter_return_value = _CountingRelation()
+            self.filter_return_value = _CountingRelation(
+                n=self.n,
+                bounds=self.bounds,
+                temporal=self.temporal,
+            )
         return self.filter_return_value
 
 
