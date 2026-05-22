@@ -188,7 +188,7 @@ class InMemoryGeoCatalog:
         elif engine == "sjoin":
             overlay = gpd.sjoin(left, right, how="inner", predicate="intersects")
             if not overlay.empty:
-                right_geometry = right.geometry.take(overlay["index_right"].to_numpy())
+                right_geometry = right.geometry.iloc[overlay["index_right"].values]
                 clipped = gpd.GeoSeries(
                     shapely.intersection(
                         overlay.geometry.to_numpy(),
@@ -199,7 +199,8 @@ class InMemoryGeoCatalog:
                 )
                 keep_geom_mask = _keep_geom_type_mask(overlay.geometry, clipped)
                 overlay = overlay.loc[keep_geom_mask].copy()
-                overlay = overlay.set_geometry(clipped.loc[keep_geom_mask])
+                clipped = clipped.loc[keep_geom_mask]
+                overlay = overlay.set_geometry(clipped)
                 overlay = overlay.drop(columns=["index_right"], errors="ignore")
         else:
             raise ValueError(f"Unsupported intersect engine: {engine!r}")
@@ -378,7 +379,7 @@ def _empty_catalog(crs: Any, backend: _BACKEND_T) -> InMemoryGeoCatalog:
 def _keep_geom_type_mask(
     left_geometry: gpd.GeoSeries, intersection_geometry: gpd.GeoSeries
 ) -> pd.Series:
-    """Match `gpd.overlay(..., keep_geom_type=True)` after vectorised clipping.
+    """Match `gpd.overlay(..., keep_geom_type=True)` after vectorized clipping.
 
     Known single/multi geometry pairs share a family. Unknown geometry
     types fall through unchanged and must match exactly.
