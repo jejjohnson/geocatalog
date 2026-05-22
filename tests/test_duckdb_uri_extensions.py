@@ -20,7 +20,6 @@ class _FakeConnection:
         self.commands.append(command)
 
     def sql(self, query: str, *, params: dict[str, str]) -> object:
-        _ = query
         return object()
 
 
@@ -94,7 +93,6 @@ def test_open_loads_extension_for_supported_uri_schemes(
     captured_source: list[str] = []
 
     def fake_sql(query: str, *, params: dict[str, str]) -> Any:
-        _ = query
         captured_source.append(params["src"])
         return object()
 
