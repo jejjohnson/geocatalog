@@ -105,6 +105,8 @@ def _iter_rows_parallel(
     # avoids the O(n_files) coordinator-memory blowup of
     # `ProcessPoolExecutor.map(fn, list(filepaths))`, which materialises
     # the full input list and queues every future up front.
+    # Ordered mode waits for the next-in-line future, so keep only one
+    # worker-width of results buffered behind any slow file.
     window = n_workers if ordered else max(n_workers * 4, 8)
     with concurrent.futures.ProcessPoolExecutor(
         max_workers=n_workers,
@@ -130,9 +132,11 @@ def _iter_rows_parallel(
             next_yield = 0
             while pending_by_index:
                 fut = pending_by_index[next_yield]
-                row = fut.result()
-                del pending_by_index[next_yield]
-                next_yield += 1
+                try:
+                    row = fut.result()
+                finally:
+                    del pending_by_index[next_yield]
+                    next_yield += 1
                 submit_next()
                 if row is not None:
                     yield row

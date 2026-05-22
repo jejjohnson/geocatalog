@@ -39,6 +39,8 @@ VECTOR_REGEX = r"labels_(?P<date>\d{8})\.gpkg"
 def _delayed_row(filepath: str | Path) -> dict[str, Any] | None:
     """Picklable helper for process-pool ordering tests."""
     index = int(Path(filepath).stem)
+    # Later indices complete faster to exercise ordered output under
+    # non-input completion order.
     time.sleep((3 - min(index, 3)) * 0.02)
     if index == 2:
         return None
