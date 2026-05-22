@@ -227,11 +227,10 @@ class DuckDBGeoCatalog:
         source_str = str(source)
         if storage_options is not None:
             raise ValueError(
-                "DuckDBGeoCatalog.open does not support storage_options; "
-                "use open_catalog(source, engine='memory', storage_options=...) "
-                "for fsspec-backed reads or configure DuckDB credentials before "
-                "opening the catalog. Note: engine='memory' loads the full "
-                "catalog into memory."
+                "DuckDBGeoCatalog does not support storage_options. Use "
+                "open_catalog(source, engine='memory', storage_options=...) "
+                "for fsspec-backed reads (loads the full catalog into memory), "
+                "or configure DuckDB credentials directly."
             )
         scheme = _scheme(source)
         if scheme in ("s3", "gs", "gcs", "https", "http", "r2", "hf"):

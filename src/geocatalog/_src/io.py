@@ -47,9 +47,9 @@ def _resolve_uri(
 ) -> str | Path | Any:
     """Resolve ``path`` to a local path or an fsspec binary file handle.
 
-    Local paths pass through unchanged. Recognised cloud/HTTP URIs are opened
-    with fsspec so downstream libraries can consume a normal seekable file-like
-    object.
+    Local paths pass through unchanged as ``str`` / ``Path`` values. Recognised
+    cloud/HTTP URIs return an fsspec file-like object; callers should pass the
+    returned value to `_close_resolved_uri` when finished.
     """
     if not _is_fsspec_uri(path):
         return path

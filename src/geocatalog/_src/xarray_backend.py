@@ -12,6 +12,7 @@ import functools
 from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
+from urllib.parse import urlsplit
 
 import geopandas as gpd
 import pandas as pd
@@ -63,8 +64,11 @@ def _xarray_engine(filepath: str | Path) -> str | None:
     falls through to xarray's default (netcdf4 / h5netcdf). Centralised
     so the build + load paths can't disagree.
     """
-    filepath = Path(str(filepath))
-    if filepath.suffix == ".zarr" or filepath.is_dir():
+    if isinstance(filepath, Path):
+        if filepath.suffix == ".zarr" or filepath.is_dir():
+            return "zarr"
+        return None
+    if Path(urlsplit(filepath).path).suffix == ".zarr":
         return "zarr"
     return None
 
