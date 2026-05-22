@@ -166,6 +166,7 @@ class DuckDBGeoCatalog:
             crs = _read_geoparquet_crs(source, default="EPSG:4326")
         if backend is None:
             backend = _read_backend_tag(con, source_str, default="raster")
+        _check_schema_version(con, source_str)
         # Parameter binding (rather than f-string interpolation) keeps
         # paths containing apostrophes — `s3://bucket/o'malley/cat.parquet`
         # or tmpdirs under a username with one — from breaking the
@@ -677,6 +678,48 @@ def _read_geoparquet_crs(source: str | Path, *, default: str) -> Any:
     if crs_val is None:
         return default
     return pyproj.CRS.from_user_input(crs_val)
+
+
+def _check_schema_version(con: duckdb_mod.DuckDBPyConnection, source: str) -> None:
+    """Raise `CatalogSchemaError` if the artifact's `_schema_version` is too new.
+
+    Reads the reserved column written by `to_geoparquet`; ad-hoc
+    parquet files without the column are treated as
+    ``SCHEMA_VERSION_CURRENT`` (no migration needed). The DuckDB
+    backend does *not* run forward migrations — it would have to
+    materialise the relation through pandas to do so, which defeats
+    the purpose of the lazy backend. Older artifacts should be brought
+    up to date out-of-band via ``geocatalog migrate``.
+    """
+    from geocatalog._src.base import CatalogSchemaError
+    from geocatalog._src.parquet import SCHEMA_VERSION_CURRENT
+
+    dd = _require_duckdb()
+    try:
+        df = con.sql(
+            "SELECT _schema_version FROM read_parquet($src) LIMIT 1",
+            params={"src": source},
+        ).df()
+    except dd.BinderException:
+        return
+    except dd.IOException:
+        return
+    if len(df) == 0 or pd.isna(df["_schema_version"].iloc[0]):
+        return
+    v_artifact = int(df["_schema_version"].iloc[0])
+    if v_artifact > SCHEMA_VERSION_CURRENT:
+        raise CatalogSchemaError(
+            f"artifact {source} has _schema_version={v_artifact}, "
+            f"exceeds reader v{SCHEMA_VERSION_CURRENT}. "
+            "Upgrade `geocatalog` to read this artifact."
+        )
+    if v_artifact < SCHEMA_VERSION_CURRENT:
+        raise CatalogSchemaError(
+            f"artifact {source} has _schema_version={v_artifact} < reader "
+            f"v{SCHEMA_VERSION_CURRENT}. The DuckDB backend does not run "
+            "forward migrations in-place; bring the artifact up to date with "
+            f"`geocatalog migrate {source} --to-version {SCHEMA_VERSION_CURRENT}`."
+        )
 
 
 def _read_backend_tag(

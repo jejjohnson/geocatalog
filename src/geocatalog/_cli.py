@@ -438,6 +438,35 @@ def stats(
 
 
 @app.command
+def migrate(
+    source: Annotated[Path, Parameter(help="GeoParquet catalog to migrate in-place.")],
+    *,
+    to_version: Annotated[
+        int | None,
+        Parameter(help="Target schema version. Defaults to the reader's current."),
+    ] = None,
+) -> int:
+    """Rewrite ``source`` at the requested schema version (#25)."""
+    from geocatalog import SCHEMA_VERSION_CURRENT, migrate_geoparquet
+    from geocatalog._src.base import CatalogSchemaError
+
+    if not source.exists():
+        print(f"catalog not found: {source}", file=sys.stderr)
+        return 3
+    target = SCHEMA_VERSION_CURRENT if to_version is None else to_version
+    try:
+        v_before = migrate_geoparquet(source, to_version=target)
+    except CatalogSchemaError as exc:
+        print(f"migrate failed: {exc}", file=sys.stderr)
+        return 2
+    if v_before == target:
+        print(f"{source} already at v{target}")
+    else:
+        print(f"wrote {source} (v{v_before} -> v{target})")
+    return 0
+
+
+@app.command
 def info(
     source: Annotated[Path, Parameter(help="GeoParquet catalog to inspect.")],
     *,

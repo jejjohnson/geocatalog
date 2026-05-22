@@ -33,7 +33,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from loguru import logger as _logger
 
-from geocatalog._src.base import CatalogRow, GeoCatalog
+from geocatalog._src.base import CatalogRow, CatalogSchemaError, GeoCatalog
 from geocatalog._src.domain import CatalogDomain
 from geocatalog._src.geoslice import (
     PIXEL_PRECISION,
@@ -43,7 +43,12 @@ from geocatalog._src.geoslice import (
 )
 from geocatalog._src.memory import InMemoryGeoCatalog
 from geocatalog._src.ops import intersect, query, union
-from geocatalog._src.parquet import from_geoparquet, to_geoparquet
+from geocatalog._src.parquet import (
+    SCHEMA_VERSION_CURRENT,
+    from_geoparquet,
+    migrate_geoparquet,
+    to_geoparquet,
+)
 from geocatalog._src.raster import (
     build_raster_catalog,
     load_raster,
@@ -70,8 +75,10 @@ __version__ = "0.0.1"
 
 __all__ = [
     "PIXEL_PRECISION",
+    "SCHEMA_VERSION_CURRENT",
     "CatalogDomain",
     "CatalogRow",
+    "CatalogSchemaError",
     "DuckDBGeoCatalog",
     "GeoCatalog",
     "GeoSlice",
@@ -85,6 +92,7 @@ __all__ = [
     "load_raster_timeseries",
     "load_vector",
     "load_xarray",
+    "migrate_geoparquet",
     "open_catalog",
     "query",
     "slice_to_window",
