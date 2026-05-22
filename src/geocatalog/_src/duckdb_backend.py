@@ -2,7 +2,7 @@
 
 The DuckDB backend swaps Phase 1's in-RAM `GeoDataFrame` for a lazy SQL
 relation on top of a GeoParquet artifact (a single file, a directory of
-shards, or an `httpfs`-readable URI). The Phase 1 Protocol surface
+shards, or a DuckDB-readable URI). The Phase 1 Protocol surface
 (``query`` / ``intersect`` / ``union`` / ``iter_slices``) is preserved —
 loaders, samplers, and the `geotoolz.patch` bridge work against either
 backend without branching.
@@ -16,7 +16,7 @@ Why DuckDB:
   beating `gpd.overlay` by 2-3 orders of magnitude at scale.
 - **Portable artifact** — the catalog *is* the GeoParquet file; share,
   version, hash, sign.
-- **httpfs** transparently reads S3 / GCS / Azure / HuggingFace.
+- **Remote extensions** transparently read S3 / GCS / Azure / HuggingFace.
 """
 
 from __future__ import annotations
@@ -25,6 +25,7 @@ from collections.abc import Iterator
 from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
+from urllib.parse import urlsplit
 
 import geopandas as gpd
 import numpy as np
@@ -74,6 +75,12 @@ def _ensure_spatial(con: duckdb_mod.DuckDBPyConnection) -> None:
     """
     con.execute("INSTALL spatial")
     con.execute("LOAD spatial")
+
+
+def _scheme(source: str | Path) -> str | None:
+    """Return the URI scheme for ``source``, if present."""
+    scheme = urlsplit(str(source)).scheme
+    return scheme.lower() if scheme else None
 
 
 class DuckDBGeoCatalog:
@@ -137,9 +144,10 @@ class DuckDBGeoCatalog:
 
         Reads the source via DuckDB's `read_parquet`; the relation
         carries the schema but no rows are materialised until queried.
-        Local paths, ``s3://``, ``gs://``, ``https://`` are all
-        supported provided the `httpfs` extension is loaded (call
-        ``con.execute("LOAD httpfs")`` on the returned ``.con``).
+        Local paths are supported directly. URI sources with ``s3://``,
+        ``gs://``, ``gcs://``, ``http://``, ``https://``, ``r2://``, or
+        ``hf://`` auto-load DuckDB's `httpfs` extension; ``az://`` and
+        ``azure://`` auto-load DuckDB's `azure` extension.
 
         CRS is recovered from the GeoParquet column metadata (PROJJSON).
         The backend tag is recovered from the reserved ``_backend``
@@ -162,6 +170,13 @@ class DuckDBGeoCatalog:
         con = dd.connect()
         _ensure_spatial(con)
         source_str = str(source)
+        scheme = _scheme(source)
+        if scheme in ("s3", "gs", "gcs", "https", "http", "r2", "hf"):
+            con.execute("INSTALL httpfs")
+            con.execute("LOAD httpfs")
+        elif scheme in ("az", "azure"):
+            con.execute("INSTALL azure")
+            con.execute("LOAD azure")
         if crs is None:
             crs = _read_geoparquet_crs(source, default="EPSG:4326")
         if backend is None:
