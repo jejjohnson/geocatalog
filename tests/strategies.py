@@ -13,7 +13,13 @@ Edge cases the strategies *do* cover:
 - Catalog with 0 rows.
 - Catalog with 1 row.
 - Intervals where ``start == end`` (instantaneous observations).
-- Bounds in any of four CRSs (4326, 3857, 32629, 3413).
+- Sub-microsecond timestamps (exercises the GeoParquet microsecond
+  truncation path on read-back).
+
+All generated bounds are in EPSG:4326 — `test_properties.py`
+reprojects to other CRSs *within* the property test rather than at
+strategy time, because the structural invariants need a canonical
+"native CRS" anchor to compare against.
 """
 
 from __future__ import annotations
@@ -21,27 +27,20 @@ from __future__ import annotations
 import geopandas as gpd
 import hypothesis.strategies as st
 import pandas as pd
-import pyproj
 import shapely.geometry
-from hypothesis import strategies
 
 from geocatalog._src.geoslice import GeoSlice
 from geocatalog._src.memory import InMemoryGeoCatalog
 
 
-# Small fixed CRS set. All four have well-defined transforms within the
-# bounding box (-10, -10, 10, 10) used by `bbox_strategy_4326` below, so
-# the CRS-invariance test can reproject AOIs without crossing into
-# undefined transform regions.
-SUPPORTED_CRS: tuple[int, ...] = (4326, 3857, 32629, 3413)
-
-
 # Use a narrow time window so generated intervals stay parseable and
 # round-trip cleanly through GeoParquet's int64-microsecond timestamps.
-# `min_value` / `max_value` are seconds-since-epoch, restricted to a few
-# decades around 2020 to keep `pd.Timestamp` happy on both platforms.
-_TIME_MIN = pd.Timestamp("2000-01-01").value // 10**9  # seconds
-_TIME_MAX = pd.Timestamp("2030-01-01").value // 10**9
+# Bounds are in *microseconds* since epoch so the strategy can emit
+# sub-second offsets — useful for exercising the int64-microsecond
+# truncation path on round-trip (a whole-second-only strategy would
+# never fire it).
+_TIME_MIN_US = pd.Timestamp("2000-01-01").value // 1000  # microseconds
+_TIME_MAX_US = pd.Timestamp("2030-01-01").value // 1000
 
 
 @st.composite
@@ -61,33 +60,37 @@ def bbox_strategy_4326(draw: st.DrawFn) -> tuple[float, float, float, float]:
 
 @st.composite
 def interval_strategy(draw: st.DrawFn) -> pd.Interval:
-    """A `pd.Interval(closed='both')` within the 2000-2030 window."""
-    start_secs = draw(st.integers(_TIME_MIN, _TIME_MAX))
+    """A `pd.Interval(closed='both')` within the 2000-2030 window.
+
+    Endpoints are drawn at *microsecond* resolution, not seconds, so the
+    strategy actually exercises the GeoParquet int64-microsecond
+    timestamp path that the round-trip property claims to cover.
+    """
+    start_us = draw(st.integers(_TIME_MIN_US, _TIME_MAX_US))
     # Allow zero-width (instantaneous observations) so we exercise the
     # NaT-adjacent edge of the IntervalIndex.
-    end_secs = draw(st.integers(start_secs, _TIME_MAX))
-    start = pd.Timestamp(start_secs, unit="s")
-    end = pd.Timestamp(end_secs, unit="s")
+    end_us = draw(st.integers(start_us, _TIME_MAX_US))
+    start = pd.Timestamp(start_us, unit="us")
+    end = pd.Timestamp(end_us, unit="us")
     return pd.Interval(start, end, closed="both")
 
 
 @st.composite
 def geoslice_strategy(draw: st.DrawFn) -> GeoSlice:
-    """A valid `GeoSlice` — bbox in EPSG:4326, interval, fixed resolution."""
+    """A valid `GeoSlice` — bbox + interval at fixed resolution in EPSG:4326.
+
+    All generated slices carry EPSG:4326 bounds + CRS, matching the
+    catalog strategy. Properties that need to fuzz CRS handling
+    reproject the slice's bounds inside the test rather than asking
+    the strategy to emit `(bounds, crs)` pairs in different units.
+    """
     bounds = draw(bbox_strategy_4326())
     interval = draw(interval_strategy())
-    crs_epsg = draw(st.sampled_from(SUPPORTED_CRS))
-    crs = pyproj.CRS.from_epsg(crs_epsg)
-    # When the chosen CRS isn't 4326 we'd have to reproject `bounds`; for
-    # the structural invariants tested in `test_properties.py` we always
-    # pair a GeoSlice's bounds with its CRS, so generate consistent units
-    # by leaving the bounds in 4326 and only producing 4326 slices here.
-    # The CRS-invariance test does its own reprojection downstream.
     return GeoSlice(
         bounds=bounds,
         interval=interval,
         resolution=(0.01, 0.01),
-        crs=pyproj.CRS.from_epsg(4326) if crs_epsg != 4326 else crs,
+        crs="EPSG:4326",
     )
 
 
@@ -132,10 +135,3 @@ def catalog_strategy(
         crs="EPSG:4326",
     )
     return InMemoryGeoCatalog(gdf, backend="raster")
-
-
-# `from hypothesis import strategies` is imported to keep an alias that
-# downstream tests can use without re-importing the top-level module —
-# avoids the linter warning about unused imports while keeping the file
-# self-documenting.
-_ = strategies

@@ -12,10 +12,16 @@ from hypothesis import settings
 from rasterio.transform import from_bounds
 
 
-# Hypothesis profiles. The `default` profile is what runs locally; `ci`
-# is selected via ``HYPOTHESIS_PROFILE=ci`` (set in the CI workflow) and
-# derandomises example generation so a green run today proves the same
-# inputs will pass tomorrow.
+# Hypothesis profiles. Two are registered:
+#
+# - ``dev`` (loaded by default locally): random examples, no deadline,
+#   ``print_blob=True`` so failure repro snippets show up in pytest output.
+# - ``ci`` (selected by ``HYPOTHESIS_PROFILE=ci`` in `.github/workflows/ci.yml`):
+#   ``derandomize=True`` so the same examples run on every build,
+#   making regressions reproducible.
+#
+# The active profile is picked from ``HYPOTHESIS_PROFILE`` and falls
+# back to ``dev``; neither call into Hypothesis's built-in ``default``.
 settings.register_profile("ci", settings(derandomize=True, deadline=None))
 settings.register_profile(
     "dev",

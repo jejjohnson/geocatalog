@@ -9,10 +9,11 @@ Three structural invariants are fuzzed at ``max_examples=200`` apiece:
 3. **Intersect cardinality symmetry** —
    ``|a.intersect(b)| == |b.intersect(a)|``.
 
-Hypothesis finds shrunk counter-examples on failure; CI fixes the seed
-(set in the suite-level ``pytest.ini_options`` via ``hypothesis-seed``)
-so regressions are reproducible. Locally, override with
-``--hypothesis-explain`` to surface the shrunken example.
+Hypothesis finds shrunk counter-examples on failure. CI runs with
+``HYPOTHESIS_PROFILE=ci`` (registered in ``tests/conftest.py``), which
+sets ``derandomize=True`` so the same examples run every build.
+Locally the ``dev`` profile is loaded by default (random examples +
+``print_blob=True``); use ``--hypothesis-explain`` for shrinking info.
 """
 
 from __future__ import annotations
@@ -33,10 +34,12 @@ from geocatalog import (
 from .strategies import bbox_strategy_4326, catalog_strategy
 
 
-# Disable Hypothesis's "function-level fixture" warning — `tmp_path`
-# would be regenerated per Hypothesis example, which is actually what we
-# want here (each example gets its own tempfile), so we silence the
-# health check rather than restructure.
+# Hypothesis flags `function_scoped_fixture` because pytest creates
+# `tmp_path` once per *test*, not once per *example* — every example
+# inside a single Hypothesis run shares the same directory. We
+# deliberately suppress the warning: the roundtrip example writes to
+# the same file path on each draw and truncates it cleanly via
+# `to_geoparquet`, so the shared state can't leak between examples.
 _SETTINGS = settings(
     max_examples=200,
     deadline=None,
