@@ -9,7 +9,6 @@ target CRS; loaders rasterise the matching features into a label
 from __future__ import annotations
 
 import functools
-import logging
 import re
 from collections.abc import Sequence
 from pathlib import Path
@@ -20,6 +19,7 @@ import numpy as np
 import pandas as pd
 import shapely.geometry
 from georeader.geotensor import GeoTensor
+from loguru import logger as log
 from rasterio.features import rasterize
 
 from geocatalog._src.geoslice import GeoSlice
@@ -28,9 +28,6 @@ from geocatalog._src.memory import InMemoryGeoCatalog
 
 if TYPE_CHECKING:
     from geocatalog._src.duckdb_backend import DuckDBGeoCatalog
-
-
-log = logging.getLogger(__name__)
 
 
 _VectorTask = Literal[
@@ -63,7 +60,7 @@ def _vector_row(
         else gpd.read_file(filepath)
     )
     if gdf.empty:
-        log.warning("Skipping empty vector file %s", filepath)
+        log.warning("Skipping empty vector file {}", filepath)
         return None, None
     observed_crs = gdf.crs
     if target_crs is not None and gdf.crs != target_crs:
@@ -77,7 +74,7 @@ def _vector_row(
     else:
         match = filename_regex.search(filepath.name)
         if match is None:
-            log.warning("Skipping %s: filename does not match regex", filepath)
+            log.warning("Skipping {}: filename does not match regex", filepath)
             return None, observed_crs
         groups = match.groupdict()
         if "date" in groups:

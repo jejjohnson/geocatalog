@@ -9,7 +9,6 @@ axis is parsed from a ``time`` coordinate (configurable).
 from __future__ import annotations
 
 import functools
-import logging
 from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -25,10 +24,8 @@ if TYPE_CHECKING:
     from geocatalog._src.duckdb_backend import DuckDBGeoCatalog
     from geocatalog._src.geoslice import GeoSlice
 
+
 from geocatalog._src.memory import InMemoryGeoCatalog
-
-
-log = logging.getLogger(__name__)
 
 
 # Only `xarray` is genuinely optional — geopandas + shapely are base deps.

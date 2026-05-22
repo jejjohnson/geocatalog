@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import dataclasses
 import functools
-import logging
 import re
 from collections.abc import Sequence
 from pathlib import Path
@@ -25,6 +24,7 @@ import pandas as pd
 import rasterio
 import shapely.geometry
 from georeader.geotensor import GeoTensor
+from loguru import logger as log
 from rasterio.enums import Resampling
 from rasterio.merge import merge as rio_merge
 from rasterio.vrt import WarpedVRT
@@ -35,9 +35,6 @@ from geocatalog._src.memory import InMemoryGeoCatalog
 
 if TYPE_CHECKING:
     from geocatalog._src.duckdb_backend import DuckDBGeoCatalog
-
-
-log = logging.getLogger(__name__)
 
 
 _RasterMergeMethod = Literal["first", "last", "min", "max", "sum"]
@@ -91,7 +88,7 @@ def _filepath_to_row(
     else:
         match = filename_regex.search(filepath.name)
         if match is None:
-            log.warning("Skipping %s: filename does not match regex", filepath)
+            log.warning("Skipping {}: filename does not match regex", filepath)
             return None
         groups = match.groupdict()
         if "date" in groups:

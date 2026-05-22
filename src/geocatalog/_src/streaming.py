@@ -28,7 +28,6 @@ from __future__ import annotations
 import concurrent.futures
 import itertools
 import json
-import logging
 import multiprocessing
 import os
 import tempfile
@@ -47,7 +46,7 @@ if TYPE_CHECKING:
     from geocatalog._src.duckdb_backend import DuckDBGeoCatalog
 
 
-log = logging.getLogger(__name__)
+from loguru import logger as log
 
 
 _BACKEND_T = Literal["raster", "xarray", "vector"]
@@ -461,7 +460,7 @@ def sort_geoparquet(
     finally:
         con.close()
     if needs_hilbert:
-        log.debug("sort_geoparquet: rewrote %s with Hilbert sort -> %s", src, dst_path)
+        log.debug("sort_geoparquet: rewrote {} with Hilbert sort -> {}", src, dst_path)
 
 
 def _quote_ident(name: str) -> str:

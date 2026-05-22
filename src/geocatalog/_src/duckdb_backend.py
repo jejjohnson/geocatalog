@@ -21,7 +21,6 @@ Why DuckDB:
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Iterator
 from functools import cached_property
 from pathlib import Path
@@ -51,9 +50,6 @@ try:
     import duckdb
 except ImportError:  # pragma: no cover - exercised via the [duckdb] extra
     duckdb = None  # type: ignore[assignment]
-
-
-log = logging.getLogger(__name__)
 
 
 _BACKEND_T = Literal["raster", "xarray", "vector"]

@@ -31,6 +31,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+from loguru import logger as _logger
+
 from geocatalog._src.base import CatalogRow, GeoCatalog
 from geocatalog._src.domain import CatalogDomain
 from geocatalog._src.geoslice import (
@@ -47,6 +49,12 @@ from geocatalog._src.raster import (
     load_raster,
     load_raster_timeseries,
 )
+
+
+# Library hygiene: loguru's recommended pattern is to disable the
+# library's own logger at import time so consumers don't see output by
+# default. Opt in from a consumer app with `logger.enable("geocatalog")`.
+_logger.disable("geocatalog")
 
 
 if TYPE_CHECKING:
