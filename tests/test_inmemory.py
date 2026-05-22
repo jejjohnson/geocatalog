@@ -182,7 +182,7 @@ class TestSetAlgebra:
         # Time mismatch ignored; both A and B clip against the labels footprint.
         assert len(joint) == 2
 
-    def test_intersect_overlay_engine_matches_default(
+    def test_intersect_overlay_engine_matches_sjoin(
         self, two_tile_catalog: InMemoryGeoCatalog
     ) -> None:
         other = _build(

@@ -184,40 +184,40 @@ class InMemoryGeoCatalog:
         left = self.gdf.reset_index(names="_left_interval")
         right = right_renamed.reset_index(names="_right_interval")
         if engine == "overlay":
-            overlay = gpd.overlay(left, right, how="intersection", keep_geom_type=True)
+            joined = gpd.overlay(left, right, how="intersection", keep_geom_type=True)
         elif engine == "sjoin":
-            overlay = gpd.sjoin(left, right, how="inner", predicate="intersects")
-            if not overlay.empty:
-                left_geometry = overlay.geometry.reset_index(drop=True)
-                right_geometry = right.geometry.iloc[
-                    overlay["index_right"]
-                ].reset_index(drop=True)
+            joined = gpd.sjoin(left, right, how="inner", predicate="intersects")
+            if not joined.empty:
+                left_geometry = joined.geometry.reset_index(drop=True)
+                right_geometry = right.geometry.iloc[joined["index_right"]].reset_index(
+                    drop=True
+                )
                 clipped = gpd.GeoSeries(
                     shapely.intersection(
                         left_geometry.to_numpy(),
                         right_geometry.to_numpy(),
                     ),
-                    index=overlay.index,
+                    index=joined.index,
                     crs=self.gdf.crs,
                 )
-                keep_geom_mask = _keep_geom_type_mask(overlay.geometry, clipped)
-                overlay = overlay.loc[keep_geom_mask].copy()
+                keep_geom_mask = _keep_geom_type_mask(joined.geometry, clipped)
+                joined = joined.loc[keep_geom_mask].copy()
                 clipped = clipped.loc[keep_geom_mask]
-                overlay = overlay.set_geometry(clipped)
-                overlay = overlay.drop(columns=["index_right"], errors="ignore")
+                joined = joined.set_geometry(clipped)
+                joined = joined.drop(columns=["index_right"], errors="ignore")
         else:
             raise ValueError(f"Unsupported intersect engine: {engine!r}")
 
-        if overlay.empty:
+        if joined.empty:
             return _empty_catalog(self.gdf.crs, self.backend)
 
         if spatial_only:
-            mint = overlay["_left_interval"].apply(lambda i: i.left)
-            maxt = overlay["_left_interval"].apply(lambda i: i.right)
-            keep_mask = pd.Series(True, index=overlay.index)
+            mint = joined["_left_interval"].apply(lambda i: i.left)
+            maxt = joined["_left_interval"].apply(lambda i: i.right)
+            keep_mask = pd.Series(True, index=joined.index)
         else:
-            li = overlay["_left_interval"]
-            ri = overlay["_right_interval"]
+            li = joined["_left_interval"]
+            ri = joined["_right_interval"]
             mint = np.maximum(
                 li.apply(lambda i: i.left).to_numpy(),
                 ri.apply(lambda i: i.left).to_numpy(),
@@ -226,19 +226,19 @@ class InMemoryGeoCatalog:
                 li.apply(lambda i: i.right).to_numpy(),
                 ri.apply(lambda i: i.right).to_numpy(),
             )
-            keep_mask = pd.Series(maxt >= mint, index=overlay.index)
-            overlay = overlay[keep_mask]
+            keep_mask = pd.Series(maxt >= mint, index=joined.index)
+            joined = joined[keep_mask]
             mint = mint[keep_mask.to_numpy()]
             maxt = maxt[keep_mask.to_numpy()]
 
-        if overlay.empty:
+        if joined.empty:
             return _empty_catalog(self.gdf.crs, self.backend)
 
         idx = pd.IntervalIndex.from_arrays(mint, maxt, closed="both", name="datetime")
-        overlay = overlay.drop(
+        joined = joined.drop(
             columns=["_left_interval", "_right_interval"], errors="ignore"
         ).set_index(idx)
-        return InMemoryGeoCatalog(overlay, backend=self.backend)
+        return InMemoryGeoCatalog(joined, backend=self.backend)
 
     def union(self, other: InMemoryGeoCatalog) -> InMemoryGeoCatalog:
         """Cross-catalog OR — concatenate rows.
@@ -387,17 +387,13 @@ def _keep_geom_type_mask(
     Known single/multi geometry pairs share a family. Unknown geometry
     types fall through unchanged and must match exactly.
     """
-    left_family = left_geometry.geom_type.map(_geometry_family)
-    intersection_family = intersection_geometry.geom_type.map(_geometry_family)
+    left_family = left_geometry.geom_type.replace(_GEOMETRY_TYPE_FAMILY)
+    intersection_family = intersection_geometry.geom_type.replace(_GEOMETRY_TYPE_FAMILY)
     return (
         intersection_geometry.notna()
         & ~intersection_geometry.is_empty
         & (left_family == intersection_family)
     )
-
-
-def _geometry_family(geometry_type: str) -> str:
-    return _GEOMETRY_TYPE_FAMILY.get(geometry_type, geometry_type)
 
 
 def _coerce_interval(time: tuple[Any, Any] | pd.Interval) -> pd.Interval:
