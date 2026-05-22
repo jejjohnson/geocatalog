@@ -29,7 +29,7 @@ _STAC_CRS = pyproj.CRS.from_epsg(4326)
 def from_stac_items(
     items: Iterable[pystac.Item],
     *,
-    asset_key: str = "data",
+    asset_key: str | Literal["*"] = "data",
     backend: _BACKEND_T = "memory",
     target_crs: Any | None = None,
     out_path: Path | None = None,
@@ -90,7 +90,7 @@ def from_stac_search(
     collections: Sequence[str],
     bbox: tuple[float, float, float, float] | None = None,
     datetime: str | None = None,
-    asset_key: str = "data",
+    asset_key: str | Literal["*"] = "data",
     backend: _BACKEND_T = "memory",
     max_items: int | None = None,
     target_crs: Any | None = None,
@@ -188,7 +188,7 @@ def to_stac_collection(
 def _item_to_rows(
     item: pystac.Item,
     *,
-    asset_key: str,
+    asset_key: str | Literal["*"],
     catalog_crs: pyproj.CRS,
     extra_properties: Sequence[str],
 ) -> list[dict[str, Any]]:
@@ -279,9 +279,14 @@ def _collection_extent(catalog: GeoCatalog, pystac: Any) -> Any:
     if any(pd.isna(value) for value in bounds):
         spatial = pystac.SpatialExtent([[-180.0, -90.0, 180.0, 90.0]])
     else:
-        if pyproj.CRS.from_user_input(catalog.gdf.crs) != _STAC_CRS:
+        catalog_crs = (
+            catalog.gdf.crs
+            if isinstance(catalog.gdf.crs, pyproj.CRS)
+            else pyproj.CRS.from_user_input(catalog.gdf.crs)
+        )
+        if catalog_crs != _STAC_CRS:
             transformer = pyproj.Transformer.from_crs(
-                catalog.gdf.crs, _STAC_CRS, always_xy=True
+                catalog_crs, _STAC_CRS, always_xy=True
             )
             bounds = transformer.transform_bounds(*bounds)
         spatial = pystac.SpatialExtent([list(bounds)])
