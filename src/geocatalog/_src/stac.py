@@ -164,7 +164,7 @@ def to_stac_collection(
         _normalize_crs_property(props)
         start = _datetime_or_none(row.interval.left)
         end = _datetime_or_none(row.interval.right)
-        item_datetime = start if start == end else None
+        item_datetime = start if _same_instant(start, end) else None
         if item_datetime is None:
             props["start_datetime"] = start.isoformat() if start is not None else None
             props["end_datetime"] = end.isoformat() if end is not None else None
@@ -308,6 +308,12 @@ def _datetime_or_none(value: Any) -> Any | None:
     if pd.isna(value):
         return None
     return pd.Timestamp(value).to_pydatetime()
+
+
+def _same_instant(left: Any | None, right: Any | None) -> bool:
+    if left is None or right is None:
+        return False
+    return pd.Timestamp(left) == pd.Timestamp(right)
 
 
 def _normalize_crs_property(props: dict[str, Any]) -> None:
