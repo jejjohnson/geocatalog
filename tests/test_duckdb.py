@@ -64,12 +64,12 @@ class _CountingRelation:
             pd.Timestamp("2024-01-01"),
             pd.Timestamp("2024-01-03"),
         ),
-        filtered: _CountingRelation | None = None,
+        filtered_result: _CountingRelation | None = None,
     ) -> None:
         self.n = n
         self.bounds = bounds
         self.temporal = temporal
-        self.filtered = filtered
+        self.filtered_result = filtered_result
         self.aggregate_calls: list[str] = []
         self.filter_calls: list[str] = []
 
@@ -96,9 +96,9 @@ class _CountingRelation:
 
     def filter(self, where: str) -> _CountingRelation:
         self.filter_calls.append(where)
-        if self.filtered is None:
-            self.filtered = _CountingRelation()
-        return self.filtered
+        if self.filtered_result is None:
+            self.filtered_result = _CountingRelation()
+        return self.filtered_result
 
 
 class _CountingConnection:
@@ -414,7 +414,7 @@ class TestCaching:
 
     def test_derived_catalog_gets_own_cache(self) -> None:
         child_relation = _CountingRelation(bounds=(0.0, 0.0, 100.0, 100.0))
-        parent_relation = _CountingRelation(filtered=child_relation)
+        parent_relation = _CountingRelation(filtered_result=child_relation)
         duck = DuckDBGeoCatalog(
             parent_relation,
             con=duckdb.connect(),

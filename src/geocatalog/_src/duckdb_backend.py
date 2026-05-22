@@ -25,7 +25,7 @@ import warnings
 from collections.abc import Iterator
 from functools import cached_property
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 from urllib.parse import urlsplit
 from weakref import WeakKeyDictionary
 
@@ -554,7 +554,7 @@ class DuckDBGeoCatalog:
             "MAX(ST_XMax(geometry)) AS xmax, "
             "MAX(ST_YMax(geometry)) AS ymax"
         ).df()
-        if len(df) == 0 or pd.isna(df["xmin"].iloc[0]):
+        if pd.isna(df["xmin"].iloc[0]):
             return (np.nan, np.nan, np.nan, np.nan)
         return (
             float(df["xmin"].iloc[0]),
@@ -574,7 +574,7 @@ class DuckDBGeoCatalog:
         df = self.relation.aggregate(
             "MIN(start_time) AS tmin, MAX(end_time) AS tmax"
         ).df()
-        if len(df) == 0 or pd.isna(df["tmin"].iloc[0]):
+        if pd.isna(df["tmin"].iloc[0]):
             return pd.Interval(pd.NaT, pd.NaT, closed="both")
         return pd.Interval(
             pd.Timestamp(df["tmin"].iloc[0]),
@@ -856,9 +856,8 @@ def _read_backend_tag(
         return default
     tag = str(df["_backend"].iloc[0])
     if tag in ("raster", "xarray", "vector"):
-        result = tag  # type: ignore[assignment]
-        _cache_backend_tag(con, source, result)
-        return result
+        _cache_backend_tag(con, source, cast(_BACKEND_T, tag))
+        return cast(_BACKEND_T, tag)
     _cache_backend_tag(con, source, default)
     return default
 
