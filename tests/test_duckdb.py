@@ -22,6 +22,11 @@ from geocatalog import (
 )
 
 
+CLOSED_CONNECTION_MESSAGE = (
+    "Cannot perform operation: DuckDBGeoCatalog connection has been closed"
+)
+
+
 def _mem_two_tiles(crs: str = "EPSG:32629") -> InMemoryGeoCatalog:
     """Two non-overlapping tiles, slightly offset in time."""
     gdf = gpd.GeoDataFrame(
@@ -178,12 +183,20 @@ class TestLifecycle:
             assert len(duck) == 2
 
         assert duck.con is None
-        with pytest.raises(duckdb.ConnectionException, match="closed"):
+        with pytest.raises(
+            duckdb.ConnectionException,
+            match=CLOSED_CONNECTION_MESSAGE,
+        ):
             len(duck)
-        with pytest.raises(duckdb.ConnectionException, match="closed"):
+        with pytest.raises(
+            duckdb.ConnectionException,
+            match=CLOSED_CONNECTION_MESSAGE,
+        ):
             list(duck.iter_rows())
 
-    def test_close_on_derived_catalog_is_noop(self, parquet_two_tiles: Path) -> None:
+    def test_derived_catalog_close_preserves_parent_connection(
+        self, parquet_two_tiles: Path
+    ) -> None:
         duck = DuckDBGeoCatalog.open(parquet_two_tiles)
         try:
             filtered = duck.query(bounds=(0, 0, 50, 50), crs="EPSG:32629")
@@ -205,7 +218,10 @@ class TestLifecycle:
         duck.close()
 
         assert duck.con is None
-        with pytest.raises(duckdb.ConnectionException, match="closed"):
+        with pytest.raises(
+            duckdb.ConnectionException,
+            match=CLOSED_CONNECTION_MESSAGE,
+        ):
             len(duck)
         with pytest.raises(duckdb.ConnectionException, match="closed"):
             len(filtered)

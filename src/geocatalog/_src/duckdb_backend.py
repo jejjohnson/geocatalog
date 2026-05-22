@@ -148,7 +148,9 @@ class DuckDBGeoCatalog:
     Connection ownership is explicit: catalogs returned by `open` own
     their DuckDB connection and close it from `close` or context-manager
     exit. Catalogs derived from `query` / `intersect` / `union` share
-    their parent's connection and `close` is a no-op for them.
+    their parent's connection and `close` is a no-op for them. Even a
+    no-filter `query` returns a non-owning wrapper so closing the result
+    cannot close the parent catalog.
 
     Args:
         relation: A DuckDB relation whose columns include ``filepath``,
@@ -193,7 +195,10 @@ class DuckDBGeoCatalog:
     def _require_open_con(self) -> duckdb_mod.DuckDBPyConnection:
         if self.con is None:
             dd = _require_duckdb()
-            raise dd.ConnectionException("DuckDBGeoCatalog connection is closed")
+            raise dd.ConnectionException(
+                "Cannot perform operation: DuckDBGeoCatalog connection has been "
+                "closed. Create a new catalog or use an existing open connection."
+            )
         return self.con
 
     def _derive(self, relation: duckdb_mod.DuckDBPyRelation) -> DuckDBGeoCatalog:
