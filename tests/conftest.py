@@ -2,12 +2,32 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import numpy as np
 import pytest
 import rasterio
+from hypothesis import settings
 from rasterio.transform import from_bounds
+
+
+# Hypothesis profiles. Two are registered:
+#
+# - ``dev`` (loaded by default locally): random examples, no deadline,
+#   ``print_blob=True`` so failure repro snippets show up in pytest output.
+# - ``ci`` (selected by ``HYPOTHESIS_PROFILE=ci`` in `.github/workflows/ci.yml`):
+#   ``derandomize=True`` so the same examples run on every build,
+#   making regressions reproducible.
+#
+# The active profile is picked from ``HYPOTHESIS_PROFILE`` and falls
+# back to ``dev``; neither call into Hypothesis's built-in ``default``.
+settings.register_profile("ci", settings(derandomize=True, deadline=None))
+settings.register_profile(
+    "dev",
+    settings(deadline=None, print_blob=True),
+)
+settings.load_profile(os.environ.get("HYPOTHESIS_PROFILE", "dev"))
 
 
 @pytest.fixture
