@@ -193,13 +193,14 @@ class DuckDBGeoCatalog:
         self._owns_con = _owns_con
 
     def _require_open_con(self) -> duckdb_mod.DuckDBPyConnection:
-        if self.con is None:
+        con = self.con
+        if con is None:
             dd = _require_duckdb()
             raise dd.ConnectionException(
                 "Cannot perform operation: DuckDBGeoCatalog connection has been "
                 "closed. Create a new catalog or use an existing open connection."
             )
-        return self.con
+        return con
 
     def _derive(self, relation: duckdb_mod.DuckDBPyRelation) -> DuckDBGeoCatalog:
         return DuckDBGeoCatalog(

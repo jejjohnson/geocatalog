@@ -28,6 +28,7 @@ CLOSED_CONNECTION_MESSAGE = (
     "Create a new catalog or use an existing open connection."
 )
 CLOSED_CONNECTION_MATCH = re.escape(CLOSED_CONNECTION_MESSAGE)
+DUCKDB_CLOSED_CONNECTION_MATCH = "Connection has already been closed"
 
 
 def _mem_two_tiles(crs: str = "EPSG:32629") -> InMemoryGeoCatalog:
@@ -226,7 +227,10 @@ class TestLifecycle:
             match=CLOSED_CONNECTION_MATCH,
         ):
             len(duck)
-        with pytest.raises(duckdb.ConnectionException, match="closed"):
+        with pytest.raises(
+            duckdb.ConnectionException,
+            match=DUCKDB_CLOSED_CONNECTION_MATCH,
+        ):
             len(filtered)
 
 
