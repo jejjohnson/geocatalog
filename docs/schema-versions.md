@@ -47,8 +47,12 @@ $ geocatalog migrate legacy.parquet --to-version 0
 legacy.parquet already at v0
 
 $ geocatalog migrate v0_artifact.parquet
-wrote v0_artifact.parquet (v0 -> v0)
+v0_artifact.parquet already at v0
 ```
+
+(In the future, once ``SCHEMA_VERSION_CURRENT`` is bumped to 1, the
+second invocation will print ``wrote v0_artifact.parquet (v0 -> v1)``
+because the rewrite actually changes the version.)
 
 `--to-version` defaults to the reader's current version. The command
 exits with status 2 if the artifact is *newer* than the reader (you
