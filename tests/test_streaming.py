@@ -49,7 +49,10 @@ def _delayed_row(filepath: str | Path) -> dict[str, Any] | None:
 
 
 def _toy_extract(filepath: str | Path) -> dict[str, object]:
-    date = pd.Timestamp(Path(filepath).stem[:10])
+    stem = Path(filepath).stem
+    if len(stem) < 10:
+        raise ValueError("toy fixture filenames must start with YYYY-MM-DD")
+    date = pd.Timestamp(stem[:10])
     offset = date.day
     return {
         "filepath": str(filepath),
@@ -396,6 +399,7 @@ class TestPartitionedArchives:
             backend="duckdb",
             out_path=out,
             partition_by=("year", "month"),
+            n_workers=2,
         )
 
         assert out.is_dir()

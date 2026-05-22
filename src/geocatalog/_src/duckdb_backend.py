@@ -90,7 +90,8 @@ def _ensure_spatial(con: duckdb_mod.DuckDBPyConnection) -> None:
         except dd.Error as exc:
             log.warning(
                 "DuckDB spatial extension is unavailable; spatial SQL operations "
-                "will fail until the extension can be installed and loaded: {}",
+                "will fail until the extension can be installed and loaded "
+                "(check network access and extension-directory permissions): {}",
                 exc,
             )
             return

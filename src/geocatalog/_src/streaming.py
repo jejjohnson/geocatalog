@@ -822,11 +822,11 @@ def _write_partitioned_rows(
     partition_set = set(partitions)
 
     out_path = Path(out_path)
-    target_dir = out_path.parent if out_path.parent != Path() else Path()
+    target_dir = out_path.parent
     staging = Path(
         tempfile.mkdtemp(
             prefix=out_path.name + ".partitioned.",
-            dir=str(target_dir) if str(target_dir) else None,
+            dir=str(target_dir),
         )
     )
     writers: dict[tuple[str, ...], StreamingParquetWriter] = {}

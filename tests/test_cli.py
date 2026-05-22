@@ -287,7 +287,7 @@ def test_convert_partition_by_default_out(
     utm29_tile_factory: Callable[..., Path],
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """`convert single.parquet --partition-by year,month` writes a Hive dir."""
+    """convert single.parquet --partition-by year,month writes a Hive dir."""
     source = _build_one_row(tmp_path, utm29_tile_factory)
     capsys.readouterr()
 
