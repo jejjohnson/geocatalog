@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import geopandas as gpd
@@ -23,8 +24,10 @@ from geocatalog import (
 
 
 CLOSED_CONNECTION_MESSAGE = (
-    "Cannot perform operation: DuckDBGeoCatalog connection has been closed"
+    "Cannot perform operation: DuckDBGeoCatalog connection has been closed. "
+    "Create a new catalog or use an existing open connection."
 )
+CLOSED_CONNECTION_MATCH = re.escape(CLOSED_CONNECTION_MESSAGE)
 
 
 def _mem_two_tiles(crs: str = "EPSG:32629") -> InMemoryGeoCatalog:
@@ -185,12 +188,12 @@ class TestLifecycle:
         assert duck.con is None
         with pytest.raises(
             duckdb.ConnectionException,
-            match=CLOSED_CONNECTION_MESSAGE,
+            match=CLOSED_CONNECTION_MATCH,
         ):
             len(duck)
         with pytest.raises(
             duckdb.ConnectionException,
-            match=CLOSED_CONNECTION_MESSAGE,
+            match=CLOSED_CONNECTION_MATCH,
         ):
             list(duck.iter_rows())
 
@@ -220,7 +223,7 @@ class TestLifecycle:
         assert duck.con is None
         with pytest.raises(
             duckdb.ConnectionException,
-            match=CLOSED_CONNECTION_MESSAGE,
+            match=CLOSED_CONNECTION_MATCH,
         ):
             len(duck)
         with pytest.raises(duckdb.ConnectionException, match="closed"):
