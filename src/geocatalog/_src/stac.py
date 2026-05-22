@@ -97,7 +97,24 @@ def from_stac_search(
     out_path: Path | None = None,
     extra_properties: Sequence[str] = (),
 ) -> GeoCatalog:
-    """Run a STAC API search and build a raster catalog from its items."""
+    """Run a STAC API search and build a raster catalog from its items.
+
+    Args:
+        client: Open `pystac_client.Client` or STAC API URL.
+        collections: Collection IDs to search.
+        bbox: Optional lon/lat search bbox.
+        datetime: Optional STAC datetime interval string.
+        asset_key: Asset key to index. Pass ``"*"`` to emit one row for
+            every asset on each item.
+        backend: ``"memory"`` or ``"duckdb"``.
+        max_items: Optional maximum number of returned search items to index.
+        target_crs: Optional CRS for catalog footprints.
+        out_path: GeoParquet destination required by ``backend="duckdb"``.
+        extra_properties: STAC property keys to preserve as catalog columns.
+
+    Returns:
+        A raster-backend `GeoCatalog` over the matching STAC assets.
+    """
     pystac_client = _require_pystac_client()
     if isinstance(client, str):
         client = pystac_client.Client.open(client)
@@ -144,7 +161,7 @@ def to_stac_collection(
             for key, value in row.extras.items()
             if key not in {"asset_key", "stac_item_id", "stac_collection"}
         }
-        _add_proj_property(props)
+        _normalize_crs_property(props)
         start = _datetime_or_none(row.interval.left)
         end = _datetime_or_none(row.interval.right)
         item_datetime = start if start == end else None
@@ -293,7 +310,7 @@ def _datetime_or_none(value: Any) -> Any | None:
     return pd.Timestamp(value).to_pydatetime()
 
 
-def _add_proj_property(props: dict[str, Any]) -> None:
+def _normalize_crs_property(props: dict[str, Any]) -> None:
     crs = props.pop("crs", None)
     if crs is None or "proj:epsg" in props or "proj:wkt2" in props:
         return
