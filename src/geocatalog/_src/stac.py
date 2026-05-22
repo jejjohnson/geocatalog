@@ -338,7 +338,7 @@ def _require_pystac_client() -> Any:
         import pystac_client
     except ImportError as exc:
         raise ImportError(
-            "`geocatalog.from_stac_search` requires the [stac] extra; install via "
+            "`from_stac_search` requires the [stac] extra; install via "
             "`pip install 'geocatalog[stac]'`."
         ) from exc
     return pystac_client
