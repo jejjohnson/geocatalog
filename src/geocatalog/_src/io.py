@@ -7,6 +7,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 
+# URI schemes resolved through fsspec instead of GDAL VSI prefixes.
 _FSSPEC_SCHEMES = frozenset(
     {
         "s3",

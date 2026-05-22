@@ -230,7 +230,8 @@ class DuckDBGeoCatalog:
                 "DuckDBGeoCatalog.open does not support storage_options; "
                 "use open_catalog(source, engine='memory', storage_options=...) "
                 "for fsspec-backed reads or configure DuckDB credentials before "
-                "opening the catalog."
+                "opening the catalog. Note: engine='memory' loads the full "
+                "catalog into memory."
             )
         scheme = _scheme(source)
         if scheme in ("s3", "gs", "gcs", "https", "http", "r2", "hf"):
