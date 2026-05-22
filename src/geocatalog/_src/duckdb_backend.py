@@ -835,8 +835,10 @@ def _read_backend_tag(
     SQL parse errors aren't silently swallowed as a missing column.
     """
     source_cache = _BACKEND_TAG_CACHE.get(con)
-    if source_cache is not None and source in source_cache:
-        return source_cache[source]
+    if source_cache is not None:
+        cached = source_cache.get(source)
+        if cached is not None:
+            return cached
 
     dd = _require_duckdb()
     try:
