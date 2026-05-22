@@ -240,6 +240,7 @@ def _item_interval(item: pystac.Item) -> tuple[pd.Timestamp, pd.Timestamp]:
 
 
 def _timestamp(value: Any) -> pd.Timestamp:
+    """Normalize STAC timestamps to UTC-naive pandas timestamps."""
     timestamp = pd.Timestamp(value)
     if timestamp.tzinfo is not None:
         return timestamp.tz_convert("UTC").tz_localize(None)
