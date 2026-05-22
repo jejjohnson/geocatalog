@@ -188,10 +188,13 @@ class InMemoryGeoCatalog:
         elif engine == "sjoin":
             overlay = gpd.sjoin(left, right, how="inner", predicate="intersects")
             if not overlay.empty:
-                right_geometry = right.geometry.iloc[overlay["index_right"].values]
+                left_geometry = overlay.geometry.reset_index(drop=True)
+                right_geometry = right.geometry.iloc[
+                    overlay["index_right"]
+                ].reset_index(drop=True)
                 clipped = gpd.GeoSeries(
                     shapely.intersection(
-                        overlay.geometry.to_numpy(),
+                        left_geometry.to_numpy(),
                         right_geometry.to_numpy(),
                     ),
                     index=overlay.index,
