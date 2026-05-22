@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import pytest
 
+from geocatalog import InMemoryGeoCatalog
+
 from .conftest import make_inmemory_catalog
 
 
 @pytest.fixture(scope="module")
-def medium_catalog():
+def medium_catalog() -> InMemoryGeoCatalog:
     """A 10⁴-row catalog reused across iter_rows benches."""
     return make_inmemory_catalog(10_000, seed=0)
 

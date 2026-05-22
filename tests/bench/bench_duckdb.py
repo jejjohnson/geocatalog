@@ -8,6 +8,8 @@ default bench job still runs cleanly.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import pytest
 
 from geocatalog import to_geoparquet
@@ -15,10 +17,15 @@ from geocatalog import to_geoparquet
 from .conftest import make_inmemory_catalog
 
 
-# Lazy import — the module is collected even without the extra, but
-# every test below is `skip`-guarded if `duckdb` failed to import.
+if TYPE_CHECKING:
+    from geocatalog import DuckDBGeoCatalog as _DuckDBGeoCatalog
+
+
+# Probe the extra eagerly so we can `skipif` cleanly; resolving the
+# public-surface attribute triggers the same friendly ImportError path
+# the library exposes to library consumers (`geocatalog.__getattr__`).
 try:
-    from geocatalog._src.duckdb_backend import DuckDBGeoCatalog
+    from geocatalog import DuckDBGeoCatalog
 
     _HAS_DUCKDB = True
 except ImportError:
@@ -36,7 +43,9 @@ _N_MEDIUM = 100_000
 
 
 @pytest.fixture(scope="module")
-def duckdb_catalog(tmp_path_factory: pytest.TempPathFactory):
+def duckdb_catalog(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> _DuckDBGeoCatalog:
     """Persist a 10⁵-row in-memory catalog as GeoParquet and reopen via DuckDB."""
     path = tmp_path_factory.mktemp("bench_duckdb") / "catalog.parquet"
     mem = make_inmemory_catalog(_N_MEDIUM, seed=0)

@@ -8,14 +8,17 @@ on:
 
 permissions:
   contents: read
-  pull-requests: write
 
 jobs:
-  # On a PR, run the bench suite twice: once on the PR head, once on
-  # main. Compare the two JSON outputs with pytest-benchmark's built-in
-  # `--benchmark-compare-fail` gate — fails the build if any tracked
-  # benchmark regresses by more than 30% (mean), which absorbs the
-  # ~10–15% noise typical of shared GitHub Actions runners.
+  # On a PR, run the bench suite twice: once on the PR head and once
+  # against `main` for a comparison baseline. We *don't* run main's own
+  # `tests/bench` — for the first PR that adds the suite, main doesn't
+  # have it yet (Copilot review #35). Instead we copy the PR's
+  # `tests/bench/` + bench-config bits onto the baseline checkout and
+  # run them against the library code in `main`. That's also the right
+  # semantic going forward: we're measuring whether the PR's library
+  # changes regress the *bench cases the PR ships*, not chasing
+  # whichever subset of benches happened to exist on main.
   bench-regression:
     name: bench-quick (PR regression gate)
     if: github.event_name == 'pull_request'
@@ -36,6 +39,18 @@ jobs:
         uses: astral-sh/setup-uv@v7
         with:
           python-version: "3.12"
+
+      - name: Stage PR's bench suite onto the baseline checkout
+        # `tests/bench/` + the `--ignore=tests/bench` / `bench_*.py`
+        # pyproject tweaks may not exist on main yet. Copy them in
+        # before installing so the baseline run can collect the same
+        # benches as the PR run. Library code (`src/`) stays untouched
+        # on the baseline so we measure library-side regression.
+        run: |
+          mkdir -p base/tests
+          cp -r pr/tests/bench base/tests/bench
+          cp pr/pyproject.toml base/pyproject.toml
+          cp pr/uv.lock base/uv.lock
 
       - name: Install (baseline)
         working-directory: base

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from geocatalog import intersect, query, union
+from geocatalog import InMemoryGeoCatalog, intersect, query, union
 
 from .conftest import make_inmemory_catalog
 
@@ -23,25 +23,25 @@ _N_INTERSECT = 1_000
 
 
 @pytest.fixture(scope="module")
-def small_catalog():
+def small_catalog() -> InMemoryGeoCatalog:
     """A 10⁴-row in-memory catalog reused across query/union benches."""
     return make_inmemory_catalog(_N_QUERY, seed=0)
 
 
 @pytest.fixture(scope="module")
-def small_catalog_b():
+def small_catalog_b() -> InMemoryGeoCatalog:
     """A second 10⁴-row catalog with a different seed for union."""
     return make_inmemory_catalog(_N_QUERY, seed=1)
 
 
 @pytest.fixture(scope="module")
-def tiny_catalog():
+def tiny_catalog() -> InMemoryGeoCatalog:
     """A 10³-row catalog used by the heavier intersect/overlay bench."""
     return make_inmemory_catalog(_N_INTERSECT, seed=0)
 
 
 @pytest.fixture(scope="module")
-def tiny_catalog_b():
+def tiny_catalog_b() -> InMemoryGeoCatalog:
     """A second 10³-row catalog with a different seed for intersect."""
     return make_inmemory_catalog(_N_INTERSECT, seed=1)
 
