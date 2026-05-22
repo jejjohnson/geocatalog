@@ -131,6 +131,7 @@ def build_xarray_catalog(
     sort_by: tuple[str, ...] | None = ("start_time", "geometry_hilbert"),
     batch_size: int = 10_000,
     n_workers: int = 1,
+    ordered: bool = False,
 ) -> InMemoryGeoCatalog | DuckDBGeoCatalog:
     """Build an xarray-shaped catalog — in-memory (default) or streamed.
 
@@ -175,6 +176,9 @@ def build_xarray_catalog(
             rewrite. Only consulted when ``backend="duckdb"``.
         batch_size: Rows per Arrow record batch. Default 10 000.
         n_workers: Process-pool size for per-file extraction.
+        ordered: With ``backend="duckdb"`` and ``n_workers>1``, preserve
+            input row order instead of completion order. Useful for
+            reproducible artifacts when ``sort_by=None``.
 
     Returns:
         `InMemoryGeoCatalog` for ``backend="memory"``, otherwise a
@@ -203,6 +207,7 @@ def build_xarray_catalog(
             sort_by=sort_by,
             batch_size=batch_size,
             n_workers=n_workers,
+            ordered=ordered,
         )
 
     rows: list[dict[str, Any]] = [
@@ -238,6 +243,7 @@ def _build_xarray_catalog_duckdb(
     sort_by: tuple[str, ...] | None,
     batch_size: int,
     n_workers: int,
+    ordered: bool,
 ) -> DuckDBGeoCatalog:
     """Streaming-write branch for `build_xarray_catalog`.
 
@@ -275,6 +281,7 @@ def _build_xarray_catalog_duckdb(
         sort_by=sort_by,
         batch_size=batch_size,
         n_workers=n_workers,
+        ordered=ordered,
     )
 
 

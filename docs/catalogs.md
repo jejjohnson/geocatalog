@@ -259,6 +259,10 @@ What this turns on:
 - **Process-pool extraction** when `n_workers > 1` — rasterio / fiona /
   xarray release the GIL during I/O, so a spawn-based pool feeds the
   single writer thread with no contention.
+- **Optional deterministic extraction order** with `ordered=True` — when
+  `sort_by=None`, rows follow the input file order instead of process
+  completion order. This is useful for byte-reproducible CI artifacts, at
+  the cost of waiting behind slow-tail files.
 - **EPSG:4326 canonicalization** when `target_crs=None` — the design's
   prescribed wire format for shared GeoParquet artifacts.
 
