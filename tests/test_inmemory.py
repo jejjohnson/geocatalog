@@ -181,6 +181,57 @@ class TestSetAlgebra:
         # Time mismatch ignored; both A and B clip against the labels footprint.
         assert len(joint) == 2
 
+    def test_intersect_overlay_engine_matches_default(
+        self, two_tile_catalog: InMemoryGeoCatalog
+    ) -> None:
+        other = _build(
+            [
+                {
+                    "geometry": shapely.geometry.box(50, 50, 250, 150),
+                    "start_time": pd.Timestamp("2024-01-01"),
+                    "end_time": pd.Timestamp("2024-01-04"),
+                    "filepath": "labels.gpkg",
+                },
+            ]
+        )
+        default = two_tile_catalog.intersect(other)
+        legacy = two_tile_catalog.intersect(other, engine="overlay")
+
+        assert {tuple(g.bounds) for g in default.gdf.geometry} == {
+            tuple(g.bounds) for g in legacy.gdf.geometry
+        }
+        assert set(default.gdf.index) == set(legacy.gdf.index)
+
+    def test_intersect_drops_boundary_only_matches(self) -> None:
+        left = _build(
+            [
+                {
+                    "geometry": shapely.geometry.box(0, 0, 1, 1),
+                    "start_time": pd.Timestamp("2024-01-01"),
+                    "end_time": pd.Timestamp("2024-01-02"),
+                    "filepath": "left.tif",
+                },
+            ]
+        )
+        right = _build(
+            [
+                {
+                    "geometry": shapely.geometry.box(1, 0, 2, 1),
+                    "start_time": pd.Timestamp("2024-01-01"),
+                    "end_time": pd.Timestamp("2024-01-02"),
+                    "filepath": "right.tif",
+                },
+            ]
+        )
+
+        assert len(left.intersect(right)) == 0
+
+    def test_intersect_rejects_unknown_engine(
+        self, two_tile_catalog: InMemoryGeoCatalog
+    ) -> None:
+        with pytest.raises(ValueError, match="Unsupported intersect engine"):
+            two_tile_catalog.intersect(two_tile_catalog, engine="missing")  # type: ignore[arg-type]
+
     def test_union(self, two_tile_catalog: InMemoryGeoCatalog) -> None:
         other = _build(
             [

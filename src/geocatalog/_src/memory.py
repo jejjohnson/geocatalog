@@ -19,12 +19,23 @@ import geopandas as gpd
 import numpy as np
 import pandas as pd
 import pyproj
+import shapely
 
 from geocatalog._src.base import CatalogRow
 from geocatalog._src.geoslice import GeoSlice
 
 
 _BACKEND_T = Literal["raster", "xarray", "vector"]
+_INTERSECT_ENGINE_T = Literal["sjoin", "overlay"]
+_GEOMETRY_TYPE_FAMILY = {
+    "Point": "Point",
+    "MultiPoint": "Point",
+    "LineString": "LineString",
+    "LinearRing": "LineString",
+    "MultiLineString": "LineString",
+    "Polygon": "Polygon",
+    "MultiPolygon": "Polygon",
+}
 
 
 class InMemoryGeoCatalog:
@@ -144,7 +155,11 @@ class InMemoryGeoCatalog:
         return InMemoryGeoCatalog(out, backend=self.backend)
 
     def intersect(
-        self, other: InMemoryGeoCatalog, *, spatial_only: bool = False
+        self,
+        other: InMemoryGeoCatalog,
+        *,
+        spatial_only: bool = False,
+        engine: _INTERSECT_ENGINE_T = "sjoin",
     ) -> InMemoryGeoCatalog:
         """Cross-catalog AND — rows whose footprints and times overlap.
 
@@ -154,22 +169,43 @@ class InMemoryGeoCatalog:
                 the same kind of file as ``self``).
             spatial_only: If True, ignore the temporal axis — useful for
                 pairing imagery with static labels.
+            engine: Spatial join engine. ``"sjoin"`` uses the GeoPandas
+                spatial index, while ``"overlay"`` preserves the legacy
+                overlay implementation.
         """
         if other.gdf.crs != self.gdf.crs:
             right_gdf = other.gdf.to_crs(self.gdf.crs)
         else:
             right_gdf = other.gdf
 
-        # Spatial intersect via gpd.overlay. Rename the right-side
-        # attribute columns up-front so they survive the overlay without
-        # collisions, *then* attach the interval columns under a sentinel
-        # name `gpd.overlay` won't touch.
         right_renamed = right_gdf.rename(
             columns={c: f"_right_{c}" for c in right_gdf.columns if c != "geometry"}
         )
         left = self.gdf.reset_index(names="_left_interval")
         right = right_renamed.reset_index(names="_right_interval")
-        overlay = gpd.overlay(left, right, how="intersection", keep_geom_type=True)
+        if engine == "overlay":
+            overlay = gpd.overlay(left, right, how="intersection", keep_geom_type=True)
+        elif engine == "sjoin":
+            right = right.assign(_right_geometry=right.geometry)
+            overlay = gpd.sjoin(left, right, how="inner", predicate="intersects")
+            if not overlay.empty:
+                clipped = gpd.GeoSeries(
+                    shapely.intersection(
+                        overlay.geometry.to_numpy(),
+                        overlay["_right_geometry"].to_numpy(),
+                    ),
+                    index=overlay.index,
+                    crs=self.gdf.crs,
+                )
+                keep_geom_mask = _keep_geom_type_mask(overlay.geometry, clipped)
+                overlay = overlay.loc[keep_geom_mask].copy()
+                overlay = overlay.set_geometry(clipped.loc[keep_geom_mask])
+                overlay = overlay.drop(
+                    columns=["index_right", "_right_geometry"], errors="ignore"
+                )
+        else:
+            raise ValueError(f"Unsupported intersect engine: {engine!r}")
+
         if overlay.empty:
             return _empty_catalog(self.gdf.crs, self.backend)
 
@@ -339,6 +375,23 @@ def _empty_catalog(crs: Any, backend: _BACKEND_T) -> InMemoryGeoCatalog:
         ),
     )
     return InMemoryGeoCatalog(empty_gdf, backend=backend)
+
+
+def _keep_geom_type_mask(
+    left_geometry: gpd.GeoSeries, intersection_geometry: gpd.GeoSeries
+) -> pd.Series:
+    """Match `gpd.overlay(..., keep_geom_type=True)` after vectorised clipping."""
+    left_family = left_geometry.geom_type.map(_geometry_family)
+    intersection_family = intersection_geometry.geom_type.map(_geometry_family)
+    return (
+        intersection_geometry.notna()
+        & ~intersection_geometry.is_empty
+        & (left_family == intersection_family)
+    )
+
+
+def _geometry_family(geometry_type: str) -> str:
+    return _GEOMETRY_TYPE_FAMILY.get(geometry_type, geometry_type)
 
 
 def _coerce_interval(time: tuple[Any, Any] | pd.Interval) -> pd.Interval:

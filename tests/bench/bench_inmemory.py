@@ -16,9 +16,8 @@ from .conftest import make_inmemory_catalog
 
 
 _N_QUERY = 10_000
-# Intersect is O(n_left * n_right) for the geopandas overlay, so it
-# stays at 10³x10³ — large enough to catch regressions, small enough to
-# keep the bench-quick CI job under the ~30 s budget the issue specifies.
+# Intersect uses GeoPandas' spatial index, but stays at 10³x10³ so the
+# bench-quick CI job remains under the ~30 s budget the issue specifies.
 _N_INTERSECT = 1_000
 
 
@@ -57,7 +56,7 @@ def test_query_small_aoi(benchmark, small_catalog) -> None:
 
 
 def test_intersect_two_catalogs(benchmark, tiny_catalog, tiny_catalog_b) -> None:
-    """Cross-catalog AND between two 10³-row catalogs (geopandas overlay)."""
+    """Cross-catalog AND between two 10³-row catalogs."""
     benchmark(intersect, tiny_catalog, tiny_catalog_b)
 
 
