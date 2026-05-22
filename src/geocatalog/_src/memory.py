@@ -244,7 +244,7 @@ class InMemoryGeoCatalog:
         reserved = {"geometry", "filepath", "start_time", "end_time"}
         extra_cols = [c for c in self.gdf.columns if c not in reserved]
         geoms = self.gdf.geometry.to_numpy(copy=False)
-        intervals = self.gdf.index
+        intervals = self.gdf.index.to_numpy(copy=False)
         paths = (
             self.gdf["filepath"].to_numpy(copy=False)
             if "filepath" in self.gdf.columns
