@@ -101,6 +101,16 @@ class _CountingRelation:
         return self.filtered
 
 
+class _CountingConnection:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def sql(self, query: str, *, params: dict[str, str]) -> _AggregateResult:
+        del query, params
+        self.calls += 1
+        return _AggregateResult(pd.DataFrame({"_backend": ["vector"]}))
+
+
 @pytest.fixture
 def parquet_two_tiles(tmp_path: Path) -> Path:
     """A GeoParquet artifact written by `to_geoparquet`."""
@@ -421,16 +431,7 @@ class TestCaching:
         assert len(child_relation.aggregate_calls) == 1
 
     def test_backend_tag_read_is_cached_per_connection_and_source(self) -> None:
-        class _Connection:
-            def __init__(self) -> None:
-                self.calls = 0
-
-            def sql(self, query: str, *, params: dict[str, str]) -> _AggregateResult:
-                del query, params
-                self.calls += 1
-                return _AggregateResult(pd.DataFrame({"_backend": ["vector"]}))
-
-        con = _Connection()
+        con = _CountingConnection()
         duckdb_backend._BACKEND_TAG_CACHE.clear()
 
         first = duckdb_backend._read_backend_tag(
