@@ -170,6 +170,40 @@ class TestOpen:
         assert isinstance(cat, InMemoryGeoCatalog)
 
 
+class TestLifecycle:
+    def test_context_manager_closes_owned_connection(
+        self, parquet_two_tiles: Path
+    ) -> None:
+        with DuckDBGeoCatalog.open(parquet_two_tiles) as duck:
+            assert len(duck) == 2
+
+        assert duck.con is None
+        with pytest.raises(duckdb.ConnectionException, match="closed"):
+            len(duck)
+
+    def test_close_on_derived_catalog_is_noop(self, parquet_two_tiles: Path) -> None:
+        duck = DuckDBGeoCatalog.open(parquet_two_tiles)
+        filtered = duck.query(bounds=(0, 0, 50, 50), crs="EPSG:32629")
+
+        filtered.close()
+
+        assert duck.con is not None
+        assert len(duck) == 2
+        assert len(filtered) == 1
+
+    def test_closing_parent_invalidates_derived_catalog(
+        self, parquet_two_tiles: Path
+    ) -> None:
+        duck = DuckDBGeoCatalog.open(parquet_two_tiles)
+        filtered = duck.query(bounds=(0, 0, 50, 50), crs="EPSG:32629")
+
+        duck.close()
+
+        assert duck.con is None
+        with pytest.raises(duckdb.ConnectionException):
+            len(filtered)
+
+
 class TestQuery:
     def test_spatial_filter(self, parquet_two_tiles: Path) -> None:
         duck = open_catalog(parquet_two_tiles, engine="duckdb")

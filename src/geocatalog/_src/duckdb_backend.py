@@ -145,6 +145,11 @@ class DuckDBGeoCatalog:
     materialise the relation on access — explicit callers should prefer
     ``iter_rows`` for streaming.
 
+    Connection ownership is explicit: catalogs returned by `open` own
+    their DuckDB connection and close it from `close` or context-manager
+    exit. Catalogs derived from `query` / `intersect` / `union` share
+    their parent's connection and `close` is a no-op for them.
+
     Args:
         relation: A DuckDB relation whose columns include ``filepath``,
             ``geometry`` (WKB BLOB or GEOMETRY), ``start_time``,
@@ -157,11 +162,14 @@ class DuckDBGeoCatalog:
             this backend.
         backend: ``"raster"`` / ``"xarray"`` / ``"vector"``; drives
             loader dispatch.
+        _owns_con: Whether this catalog is responsible for closing
+            ``con``.
 
     Attributes:
         relation: The underlying DuckDB relation; escape hatch for SQL
             power users.
-        con: The owning connection.
+        con: The associated connection. Set to ``None`` after an owning
+            catalog is closed.
         crs: ``pyproj.CRS`` for ``geometry``.
         backend: Loader dispatch tag.
     """
@@ -173,12 +181,41 @@ class DuckDBGeoCatalog:
         con: duckdb_mod.DuckDBPyConnection,
         crs: Any,
         backend: _BACKEND_T,
+        _owns_con: bool = False,
     ) -> None:
         _require_duckdb()
         self.relation = relation
-        self.con = con
+        self.con: duckdb_mod.DuckDBPyConnection | None = con
         self.crs = pyproj.CRS.from_user_input(crs)
         self.backend = backend
+        self._owns_con = _owns_con
+
+    def _require_open_con(self) -> duckdb_mod.DuckDBPyConnection:
+        if self.con is None:
+            dd = _require_duckdb()
+            raise dd.ConnectionException("DuckDBGeoCatalog connection is closed")
+        return self.con
+
+    def _derive(self, relation: duckdb_mod.DuckDBPyRelation) -> DuckDBGeoCatalog:
+        return DuckDBGeoCatalog(
+            relation,
+            con=self._require_open_con(),
+            crs=self.crs,
+            backend=self.backend,
+        )
+
+    def close(self) -> None:
+        """Close this catalog's DuckDB connection if it owns it."""
+        if self._owns_con and self.con is not None:
+            self.con.close()
+            self.con = None
+
+    def __enter__(self) -> DuckDBGeoCatalog:
+        self._require_open_con()
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self.close()
 
     # ── factories ────────────────────────────────────────────────────────
 
@@ -302,7 +339,7 @@ class DuckDBGeoCatalog:
             params={"src": source_str, "hive": partitioned},
             retries=retries,
         )
-        return cls(relation, con=con, crs=crs, backend=backend)
+        return cls(relation, con=con, crs=crs, backend=backend, _owns_con=True)
 
     @classmethod
     def from_memory(
@@ -367,6 +404,7 @@ class DuckDBGeoCatalog:
             An `InMemoryGeoCatalog` over the materialised rows, same
             CRS, same backend tag.
         """
+        self._require_open_con()
         df = self.relation.df()
         return _df_to_inmemory(df, crs=self.crs, backend=self.backend)
 
@@ -404,6 +442,7 @@ class DuckDBGeoCatalog:
             TypeError: If both ``slice_`` and any of (``bounds``,
                 ``time``) are passed.
         """
+        self._require_open_con()
         if slice_ is not None and (bounds is not None or time is not None):
             raise TypeError("query: pass either slice_ or (bounds + time), not both")
         if slice_ is not None:
@@ -412,7 +451,7 @@ class DuckDBGeoCatalog:
             q_interval = slice_.interval
         else:
             if bounds is None and time is None:
-                return self
+                return self._derive(self.relation)
             q_bounds = bounds
             q_crs = crs
             q_interval = _coerce_interval(time) if time is not None else None
@@ -431,12 +470,10 @@ class DuckDBGeoCatalog:
             where.append(f"start_time <= TIMESTAMP '{t_hi}'")
 
         if not where:
-            return self
+            return self._derive(self.relation)
         clause = " AND ".join(where)
         filtered = self.relation.filter(clause)
-        return DuckDBGeoCatalog(
-            filtered, con=self.con, crs=self.crs, backend=self.backend
-        )
+        return self._derive(filtered)
 
     def intersect(
         self,
@@ -465,7 +502,8 @@ class DuckDBGeoCatalog:
             tightest overlap of left and right (or the left interval
             when ``spatial_only=True``).
         """
-        other_duck = _coerce_to_duckdb(other, con=self.con, target_crs=self.crs)
+        con = self._require_open_con()
+        other_duck = _coerce_to_duckdb(other, con=con, target_crs=self.crs)
 
         left_name = f"_geocatalog_left_{id(self):x}"
         right_name = f"_geocatalog_right_{id(other_duck):x}"
@@ -498,10 +536,8 @@ class DuckDBGeoCatalog:
               ON ST_Intersects(L.geometry, R.geometry)
                  {temporal}
         """
-        joined = self.con.sql(sql)
-        return DuckDBGeoCatalog(
-            joined, con=self.con, crs=self.crs, backend=self.backend
-        )
+        joined = con.sql(sql)
+        return self._derive(joined)
 
     def union(self, other: DuckDBGeoCatalog | InMemoryGeoCatalog) -> DuckDBGeoCatalog:
         """Cross-catalog OR via SQL ``UNION ALL``.
@@ -517,7 +553,8 @@ class DuckDBGeoCatalog:
         Returns:
             A new `DuckDBGeoCatalog` over the union relation.
         """
-        other_duck = _coerce_to_duckdb(other, con=self.con, target_crs=self.crs)
+        con = self._require_open_con()
+        other_duck = _coerce_to_duckdb(other, con=con, target_crs=self.crs)
         left_name = f"_geocatalog_unionL_{id(self):x}"
         right_name = f"_geocatalog_unionR_{id(other_duck):x}"
         self.relation.create_view(left_name, replace=True)
@@ -533,10 +570,8 @@ class DuckDBGeoCatalog:
             UNION ALL BY NAME
             SELECT * FROM {right_name}
         """
-        unioned = self.con.sql(sql)
-        return DuckDBGeoCatalog(
-            unioned, con=self.con, crs=self.crs, backend=self.backend
-        )
+        unioned = con.sql(sql)
+        return self._derive(unioned)
 
     def iter_rows(self, *, batch_size: int = 1024) -> Iterator[CatalogRow]:
         """Stream rows as `CatalogRow` instances.
@@ -552,6 +587,7 @@ class DuckDBGeoCatalog:
         Yields:
             `CatalogRow` with ``geometry`` decoded from WKB.
         """
+        self._require_open_con()
         del batch_size
         df = self.relation.df()
         if len(df) == 0:
@@ -609,6 +645,7 @@ class DuckDBGeoCatalog:
             ``(xmin, ymin, xmax, ymax)`` in catalog-CRS units. Four
             NaNs for an empty catalog.
         """
+        self._require_open_con()
         df = self.relation.aggregate(
             "MIN(ST_XMin(geometry)) AS xmin, "
             "MIN(ST_YMin(geometry)) AS ymin, "
@@ -632,6 +669,7 @@ class DuckDBGeoCatalog:
             ``pd.Interval(min(start_time), max(end_time), closed='both')``.
             Both endpoints are ``pd.NaT`` for an empty catalog.
         """
+        self._require_open_con()
         df = self.relation.aggregate(
             "MIN(start_time) AS tmin, MAX(end_time) AS tmax"
         ).df()
@@ -688,16 +726,13 @@ class DuckDBGeoCatalog:
         Returns:
             A filtered `DuckDBGeoCatalog`.
         """
-        return DuckDBGeoCatalog(
-            self.relation.filter(where),
-            con=self.con,
-            crs=self.crs,
-            backend=self.backend,
-        )
+        self._require_open_con()
+        return self._derive(self.relation.filter(where))
 
     @cached_property
     def _row_count(self) -> int:
         """Cached row count from one COUNT(*) query."""
+        self._require_open_con()
         df = self.relation.aggregate("COUNT(*) AS n").df()
         return int(df["n"].iloc[0])
 
