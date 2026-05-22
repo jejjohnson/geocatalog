@@ -2,12 +2,26 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import numpy as np
 import pytest
 import rasterio
+from hypothesis import settings
 from rasterio.transform import from_bounds
+
+
+# Hypothesis profiles. The `default` profile is what runs locally; `ci`
+# is selected via ``HYPOTHESIS_PROFILE=ci`` (set in the CI workflow) and
+# derandomises example generation so a green run today proves the same
+# inputs will pass tomorrow.
+settings.register_profile("ci", settings(derandomize=True, deadline=None))
+settings.register_profile(
+    "dev",
+    settings(deadline=None, print_blob=True),
+)
+settings.load_profile(os.environ.get("HYPOTHESIS_PROFILE", "dev"))
 
 
 @pytest.fixture
