@@ -790,7 +790,29 @@ def write_partitioned_rows(
     batch_size: int = 10_000,
     replace: bool = True,
 ) -> int:
-    """Write row dicts to a Hive-partitioned GeoParquet directory."""
+    """Write row dicts to a Hive-partitioned GeoParquet directory.
+
+    This is the lower-level writer used by `to_geoparquet(...,
+    partition_by=...)` and append workflows. Rows are streamed into one
+    shard per touched partition; ``replace=False`` moves only those new
+    shards into an existing archive.
+
+    Args:
+        rows: Iterator of catalog row dictionaries with shapely geometry.
+        out_path: Destination partitioned directory.
+        crs: CRS to encode in each shard's GeoParquet metadata.
+        backend: Backend tag for loader dispatch.
+        partition_by: Hive partition columns. ``"year"``, ``"month"``,
+            and ``"day"`` are derived from each row's ``start_time``.
+        schema_version: Reserved catalog schema version written per row.
+        write_bbox: Emit the GeoParquet 1.1 ``bbox`` covering struct.
+        batch_size: Rows per Arrow record batch.
+        replace: Replace the whole output directory when True; append only
+            the new shards when False.
+
+    Returns:
+        Number of rows written.
+    """
     return _write_partitioned_rows(
         rows,
         out_path=out_path,
@@ -831,7 +853,8 @@ def _write_partitioned_rows(
     )
     writers: dict[tuple[str, ...], StreamingParquetWriter] = {}
     rows_written = 0
-    shard_id = uuid.uuid4().hex
+    write_session_id = uuid.uuid4().hex
+    partition_counter = itertools.count()
     try:
         for row in rows:
             values = tuple(_partition_value(row, name) for name in partitions)
@@ -844,7 +867,7 @@ def _write_partitioned_rows(
                     )
                 )
                 partition_dir.mkdir(parents=True, exist_ok=True)
-                partition_shard_id = f"{shard_id}-{uuid.uuid4().hex}"
+                partition_shard_id = f"{write_session_id}-{next(partition_counter):08d}"
                 shard = partition_dir / f"part-{partition_shard_id}.parquet"
                 writer = StreamingParquetWriter(
                     shard,

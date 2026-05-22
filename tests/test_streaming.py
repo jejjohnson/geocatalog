@@ -438,6 +438,9 @@ class TestPartitionedArchives:
             assert path.exists()
             assert path.stat().st_mtime_ns == mtime
         assert len(list((archive / "year=2024" / "month=2").glob("*.parquet"))) == 1
+        february = catalog.sql("month = 2")
+        assert len(february) == 1
+        assert Path(next(february.iter_rows()).filepath).name == "2024-02-01-c.tif"
 
 
 # ---------------------------------------------------------------------------

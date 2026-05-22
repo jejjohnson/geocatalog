@@ -76,9 +76,11 @@ def _require_duckdb() -> Any:
 def _ensure_spatial(con: duckdb_mod.DuckDBPyConnection) -> None:
     """Install + load the `spatial` extension on a connection.
 
-    Idempotent — DuckDB no-ops on a second LOAD. Pulled into a helper so
-    every code path that constructs a `DuckDBGeoCatalog` goes through the
-    same setup.
+    Idempotent — DuckDB no-ops on a second LOAD. If the extension cannot
+    be installed (for example in an offline environment), opening a
+    catalog still succeeds for non-spatial operations such as ``len()``
+    and partition-column filters; later spatial SQL calls will raise the
+    DuckDB error that names the missing extension.
     """
     dd = _require_duckdb()
     try:
