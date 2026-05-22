@@ -180,6 +180,8 @@ class TestLifecycle:
         assert duck.con is None
         with pytest.raises(duckdb.ConnectionException, match="closed"):
             len(duck)
+        with pytest.raises(duckdb.ConnectionException, match="closed"):
+            list(duck.iter_rows())
 
     def test_close_on_derived_catalog_is_noop(self, parquet_two_tiles: Path) -> None:
         duck = DuckDBGeoCatalog.open(parquet_two_tiles)
@@ -203,6 +205,8 @@ class TestLifecycle:
         duck.close()
 
         assert duck.con is None
+        with pytest.raises(duckdb.ConnectionException, match="closed"):
+            len(duck)
         with pytest.raises(duckdb.ConnectionException, match="closed"):
             len(filtered)
 
