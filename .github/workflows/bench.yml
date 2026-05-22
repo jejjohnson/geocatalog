@@ -1,0 +1,122 @@
+name: Bench
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  # On a PR, run the bench suite twice: once on the PR head and once
+  # against `main` for a comparison baseline. We *don't* run main's own
+  # `tests/bench` — for the first PR that adds the suite, main doesn't
+  # have it yet (Copilot review #35). Instead we copy the PR's
+  # `tests/bench/` + bench-config bits onto the baseline checkout and
+  # run them against the library code in `main`. That's also the right
+  # semantic going forward: we're measuring whether the PR's library
+  # changes regress the *bench cases the PR ships*, not chasing
+  # whichever subset of benches happened to exist on main.
+  bench-regression:
+    name: bench-quick (PR regression gate)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out PR head
+        uses: actions/checkout@v6
+        with:
+          path: pr
+
+      - name: Check out main as baseline
+        uses: actions/checkout@v6
+        with:
+          ref: main
+          path: base
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.12"
+
+      - name: Stage PR's bench suite onto the baseline checkout
+        # `tests/bench/` + the `--ignore=tests/bench` / `bench_*.py`
+        # pyproject tweaks may not exist on main yet. Copy them in
+        # before installing so the baseline run can collect the same
+        # benches as the PR run. Library code (`src/`) stays untouched
+        # on the baseline so we measure library-side regression.
+        run: |
+          mkdir -p base/tests
+          cp -r pr/tests/bench base/tests/bench
+          cp pr/pyproject.toml base/pyproject.toml
+          cp pr/uv.lock base/uv.lock
+
+      - name: Install (baseline)
+        working-directory: base
+        run: uv sync --all-extras --group dev
+
+      - name: Run baseline benches
+        working-directory: base
+        # `--benchmark-save=baseline` writes JSON into
+        # `base/.benchmarks/<machine>/baseline_*.json` for the comparison
+        # step below to read.
+        run: |
+          uv run pytest tests/bench --benchmark-only --no-cov \
+            --benchmark-save=baseline \
+            -q
+
+      - name: Stage baseline for comparison
+        # pytest-benchmark 5.x stores files as
+        # `.benchmarks/<machine>/0001_baseline.json`. Copy the whole
+        # tree (machine subdir + JSON) into the PR checkout so the
+        # next `pytest` invocation discovers it.
+        run: |
+          mkdir -p pr/.benchmarks
+          cp -r base/.benchmarks/* pr/.benchmarks/
+          # Show what's there so a CI debug pass can confirm structure.
+          find pr/.benchmarks -type f
+
+      - name: Install (PR)
+        working-directory: pr
+        run: uv sync --all-extras --group dev
+
+      - name: Run PR benches against baseline (fails on >30% regression)
+        working-directory: pr
+        # `--benchmark-compare=0001` matches by numeric ID rather than
+        # glob — pytest-benchmark 5.x's `--benchmark-compare=baseline`
+        # (suffix match) didn't reliably resolve in CI.
+        run: |
+          uv run pytest tests/bench --benchmark-only --no-cov \
+            --benchmark-compare=0001 \
+            --benchmark-compare-fail=mean:30% \
+            -q
+
+  # On push-to-main, just run the suite and upload the JSON as a build
+  # artifact so the next PR's compare-against-main step has data even
+  # when its commit is older than the action's retention window.
+  bench-full:
+    name: bench-full (main baseline)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --all-extras --group dev
+
+      - name: Run full bench suite
+        run: |
+          uv run pytest tests/bench --benchmark-only --no-cov \
+            --benchmark-save=main \
+            -q
+
+      - name: Upload bench JSON
+        uses: actions/upload-artifact@v7
+        with:
+          name: benchmark-main
+          path: .benchmarks/
+          retention-days: 90
