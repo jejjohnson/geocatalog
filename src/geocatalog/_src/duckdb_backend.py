@@ -81,9 +81,12 @@ def _scheme(source: str | Path) -> str | None:
     """Return the lowercase URI scheme for ``source``, or ``None`` for paths.
 
     Examples:
-        ``s3://bucket/cat.parquet`` returns ``"s3"``.
-        ``Path("cat.parquet")`` returns ``None``.
-        ``"C:/data/cat.parquet"`` returns ``None``.
+        >>> _scheme("s3://bucket/cat.parquet")
+        's3'
+        >>> _scheme(Path("cat.parquet"))
+        None
+        >>> _scheme("C:/data/cat.parquet")
+        None
     """
     if isinstance(source, Path):
         return None

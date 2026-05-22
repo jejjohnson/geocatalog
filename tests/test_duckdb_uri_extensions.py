@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -22,7 +23,7 @@ class _FakeConnection:
     def execute(self, command: str) -> None:
         self.commands.append(command)
 
-    def sql(self, query: str, *, params: dict[str, str]) -> _FakeRelation:
+    def sql(self, query: str, *, params: dict[str, Any]) -> _FakeRelation:
         return _FakeRelation()
 
 
@@ -95,7 +96,7 @@ def test_open_loads_extension_for_supported_uri_schemes(
 ) -> None:
     captured_source: list[str] = []
 
-    def fake_sql(query: str, *, params: dict[str, str]) -> _FakeRelation:
+    def fake_sql(query: str, *, params: dict[str, Any]) -> _FakeRelation:
         assert query == "SELECT * FROM read_parquet($src)"
         captured_source.append(params["src"])
         return _FakeRelation()
