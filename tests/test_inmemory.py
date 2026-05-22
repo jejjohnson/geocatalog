@@ -197,9 +197,11 @@ class TestSetAlgebra:
         default = two_tile_catalog.intersect(other)
         legacy = two_tile_catalog.intersect(other, engine="overlay")
 
-        assert {tuple(g.bounds) for g in default.gdf.geometry} == {
-            tuple(g.bounds) for g in legacy.gdf.geometry
-        }
+        assert len(default) == len(legacy)
+        assert all(
+            any(geom.equals(legacy_geom) for legacy_geom in legacy.gdf.geometry)
+            for geom in default.gdf.geometry
+        )
         assert set(default.gdf.index) == set(legacy.gdf.index)
 
     def test_intersect_drops_boundary_only_matches(self) -> None:
