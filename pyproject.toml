@@ -1,6 +1,6 @@
 [project]
 name = "geocatalog"
-version = "0.0.0"
+version = "0.0.1"
 description = "Spatiotemporal catalog over geospatial files — the GeoSlice-driven index extracted from geotoolz."
 authors = [
     {name="J. Emmanuel Johnson", email="jemanjohnson34@gmail.com"},
