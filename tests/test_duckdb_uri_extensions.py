@@ -19,7 +19,7 @@ class _FakeConnection:
     def execute(self, command: str) -> None:
         self.commands.append(command)
 
-    def sql(self, query: str, *, params: dict[str, str]) -> object:
+    def sql(self, _query: str, *, params: dict[str, str]) -> object:
         return object()
 
 
@@ -86,10 +86,10 @@ def test_open_loads_extension_for_supported_uri_schemes(
     fake_duckdb: _FakeConnection,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    seen_source: list[str] = []
+    captured_source: list[str] = []
 
-    def fake_sql(query: str, *, params: dict[str, str]) -> Any:
-        seen_source.append(params["src"])
+    def fake_sql(_query: str, *, params: dict[str, str]) -> Any:
+        captured_source.append(params["src"])
         return object()
 
     monkeypatch.setattr(fake_duckdb, "sql", fake_sql)
@@ -102,4 +102,4 @@ def test_open_loads_extension_for_supported_uri_schemes(
         "LOAD spatial",
         *extension_commands,
     ]
-    assert seen_source == [str(source)]
+    assert captured_source == [str(source)]
