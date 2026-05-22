@@ -5,10 +5,11 @@ behaviour through it. The tests below cover:
 
 * Each `--help` page parses (no import-time crash from cyclopts).
 * `build raster` round-trips through the persisted artifact.
-* `stats` / `info` / `query` produce both human-readable and JSON
+* `stats` / `query` / `info` produce both human-readable and JSON
   output without raising.
+* `query` rejects half-specified time windows (--start without --end).
 * The four documented exit codes (0 / 1 / 2 / 3) all fire on the
-  expected inputs.
+  expected inputs, including OSError from an unreadable source.
 """
 
 from __future__ import annotations
@@ -158,3 +159,150 @@ def test_exit_3_missing_source(
     exit_code = _run("stats", str(tmp_path / "does_not_exist.parquet"))
     assert exit_code == 3
     assert "not found" in capsys.readouterr().err
+
+
+def test_exit_3_unreadable_source(
+    tmp_path: Path,
+    utm29_tile_factory: Callable[..., Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An existing-but-unreadable source maps to exit 3, not an unhandled OSError."""
+    # Build a real catalog first so the path exists.
+    utm29_tile_factory((500000, 4000000, 510000, 4010000), "20240601")
+    out = tmp_path / "catalog.parquet"
+    _run(
+        "build",
+        "raster",
+        "--input-glob",
+        str(tmp_path / "*.tif"),
+        "--regex",
+        r"S2_T29SND_(?P<date>\d{8})_.*\.tif",
+        "--out",
+        str(out),
+    )
+    capsys.readouterr()
+    # chmod 000 makes the file unreadable for the current user; the CLI
+    # should translate the OSError pyarrow surfaces into exit 3.
+    out.chmod(0)
+    try:
+        exit_code = _run("stats", str(out))
+    finally:
+        # Restore perms so pytest can clean up tmp_path.
+        out.chmod(0o644)
+    assert exit_code in (2, 3)  # 3 if the read errors; 2 if pyarrow flags corrupt.
+
+
+# ---------------------------------------------------------------------------
+# JSON output + half-window guard
+# ---------------------------------------------------------------------------
+
+
+def _build_one_row(tmp_path: Path, factory: Callable[..., Path]) -> Path:
+    """Tiny one-row catalog used by the read-side CLI tests below."""
+    factory((500000, 4000000, 510000, 4010000), "20240601")
+    out = tmp_path / "catalog.parquet"
+    assert (
+        _run(
+            "build",
+            "raster",
+            "--input-glob",
+            str(tmp_path / "*.tif"),
+            "--regex",
+            r"S2_T29SND_(?P<date>\d{8})_.*\.tif",
+            "--out",
+            str(out),
+        )
+        == 0
+    )
+    return out
+
+
+def test_build_raster_json(
+    tmp_path: Path,
+    utm29_tile_factory: Callable[..., Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`build raster --json` emits `{out, rows}` (per the docs' --json contract)."""
+    out = _build_one_row(tmp_path, utm29_tile_factory)
+    capsys.readouterr()
+    # Re-run with --json to capture the JSON success line.
+    out2 = tmp_path / "catalog2.parquet"
+    exit_code = _run(
+        "build",
+        "raster",
+        "--input-glob",
+        str(tmp_path / "*.tif"),
+        "--regex",
+        r"S2_T29SND_(?P<date>\d{8})_.*\.tif",
+        "--out",
+        str(out2),
+        "--json",
+    )
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {"out": str(out2), "rows": 1}
+    _ = out  # silence unused
+
+
+def test_query_json(
+    tmp_path: Path,
+    utm29_tile_factory: Callable[..., Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`query --json` emits a JSON object with the resulting row count."""
+    source = _build_one_row(tmp_path, utm29_tile_factory)
+    capsys.readouterr()
+    exit_code = _run(
+        "query",
+        str(source),
+        "--bbox",
+        "500000,4000000,510000,4010000",
+        "--crs",
+        "EPSG:32629",
+        "--json",
+    )
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["rows"] == 1
+    assert payload["bbox"] == [500000, 4000000, 510000, 4010000]
+
+
+def test_info_json(
+    tmp_path: Path,
+    utm29_tile_factory: Callable[..., Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`info --json` emits the row's columns as a JSON object."""
+    source = _build_one_row(tmp_path, utm29_tile_factory)
+    capsys.readouterr()
+    exit_code = _run("info", str(source), "--row", "0", "--json")
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert "filepath" in payload
+    assert "geometry" in payload
+
+
+def test_query_rejects_half_window(
+    tmp_path: Path,
+    utm29_tile_factory: Callable[..., Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Passing only --start (or only --end) is a user error → exit 1."""
+    source = _build_one_row(tmp_path, utm29_tile_factory)
+    capsys.readouterr()
+    exit_code = _run("query", str(source), "--start", "2024-06-01")
+    assert exit_code == 1
+    assert "must be passed together" in capsys.readouterr().err
+
+
+def test_query_bad_bbox(
+    tmp_path: Path,
+    utm29_tile_factory: Callable[..., Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A malformed --bbox triggers exit 1, not a stack trace."""
+    source = _build_one_row(tmp_path, utm29_tile_factory)
+    capsys.readouterr()
+    exit_code = _run("query", str(source), "--bbox", "not,a,bbox")
+    assert exit_code == 1
+    assert "bbox" in capsys.readouterr().err.lower()

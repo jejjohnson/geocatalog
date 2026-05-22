@@ -57,6 +57,9 @@ time    ['2024-06-01', '2024-06-30']
 Pass `--crs EPSG:32629` (or any other identifier) to interpret `--bbox`
 in a non-default CRS. The library reprojects internally.
 
+`--start` and `--end` are paired — pass either both or neither.
+Passing only one is rejected with exit code 1.
+
 ### `stats`
 
 Top-line metadata about an artifact — rows, bounds, temporal extent,
@@ -93,6 +96,11 @@ table to a JSON object. This is the right choice when piping into
 ```console
 $ geocatalog stats catalog.parquet --json | jq .rows
 1247891
+
+$ geocatalog build raster --input-glob "data/*.tif" \
+    --regex "S2_(?P<date>\d{8})_.+\.tif" \
+    --out catalog.parquet --json
+{"out": "catalog.parquet", "rows": 42}
 ```
 
 ## Exit codes

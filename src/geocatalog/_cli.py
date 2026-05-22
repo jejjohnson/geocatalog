@@ -1,30 +1,33 @@
 """`geocatalog` console command (#23).
 
 Thin CLI over the library API — every subcommand maps to a single
-public function and adds nothing more than argument parsing and
-human / JSON-friendly output. Business logic stays in the library.
+public function and adds nothing more than argument parsing, exit-code
+mapping, and human / JSON-friendly output. Business logic stays in
+the library.
 
 Exit codes:
 
 * 0 — success.
-* 1 — user error (bad args, missing extra, no files match glob).
+* 1 — user error (bad args, missing extra, no files match glob,
+       invalid bbox / time range, partial ``--start`` / ``--end``).
 * 2 — catalog error (corrupt artifact, schema mismatch).
-* 3 — I/O error (path not readable / writable).
+* 3 — I/O error (path not readable / writable, parent dir missing).
 """
 
 from __future__ import annotations
 
 import glob
 import json
+import os
 import sys
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 import pandas as pd
 from cyclopts import App, Parameter
 
 
-# Three sub-apps + the root. Cyclopts lets us register sub-apps via
+# Sub-app + root. Cyclopts lets us register sub-apps via
 # `app.command(sub_app)`; `name=` controls the verb the user types.
 app = App(
     name="geocatalog",
@@ -53,8 +56,8 @@ def _expand_glob(pattern: str) -> list[Path]:
     """
     if "://" in pattern:
         raise ValueError(
-            f"Remote URIs not supported by the CLI yet (#23 follow-on): {pattern!r}. "
-            "Expand the URI list yourself and pass concrete paths."
+            f"Remote URIs not supported by the CLI yet (#23 follow-on): "
+            f"{pattern!r}. Expand the URI list yourself and pass concrete paths."
         )
     matches = sorted(glob.glob(pattern, recursive=True))
     return [Path(m) for m in matches]
@@ -82,6 +85,31 @@ def _emit(payload: dict[str, object], *, as_json: bool) -> None:
         print(f"{key.ljust(width)}  {value}")
 
 
+def _write_catalog(cat: Any, out: Path) -> int | None:
+    """Persist `cat` to `out`, returning a CLI exit code on failure.
+
+    Returns ``None`` on success, ``3`` on filesystem failure. Pulled
+    into a helper so each `build` subcommand maps OSError to exit 3
+    consistently.
+    """
+    from geocatalog import to_geoparquet
+
+    try:
+        to_geoparquet(cat, out)
+    except OSError as exc:
+        print(f"could not write {out}: {exc}", file=sys.stderr)
+        return 3
+    return None
+
+
+def _emit_build_result(out: Path, n_rows: int, *, json_output: bool) -> None:
+    """Standardised success line for the build subcommands."""
+    if json_output:
+        print(json.dumps({"out": str(out), "rows": n_rows}))
+    else:
+        print(f"wrote {out} ({n_rows} rows)")
+
+
 # ---------------------------------------------------------------------------
 # build
 # ---------------------------------------------------------------------------
@@ -98,8 +126,7 @@ def raster(
         str | None,
         Parameter(
             help=(
-                "Filename regex with `(?P<date>...)` or "
-                "`(?P<start>...)+(?P<stop>...)`."
+                "Filename regex with `(?P<date>...)` or `(?P<start>...)+(?P<stop>...)`."
             )
         ),
     ] = None,
@@ -114,25 +141,44 @@ def raster(
         Literal["memory", "duckdb"],
         Parameter(help="`memory` builds in RAM; `duckdb` streams to GeoParquet."),
     ] = "memory",
+    json_output: Annotated[
+        bool, Parameter(name=["--json"], help="Emit machine-readable JSON.")
+    ] = False,
 ) -> int:
     """Build a raster catalog from a glob of GeoTIFFs."""
-    from geocatalog import build_raster_catalog, to_geoparquet
+    from geocatalog import build_raster_catalog
 
-    paths = _expand_glob(input_glob)
+    try:
+        paths = _expand_glob(input_glob)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
     if not paths:
         print(f"no files matched {input_glob!r}", file=sys.stderr)
         return 1
-    cat = build_raster_catalog(
-        paths,
-        filename_regex=regex,
-        date_format=date_format,
-        target_crs=target_crs,
-        backend=backend,
-        out_path=out if backend == "duckdb" else None,
-    )
+    try:
+        cat = build_raster_catalog(
+            paths,
+            filename_regex=regex,
+            date_format=date_format,
+            target_crs=target_crs,
+            backend=backend,
+            out_path=out if backend == "duckdb" else None,
+        )
+    except ImportError as exc:
+        print(f"build raster needs an extra: {exc}", file=sys.stderr)
+        return 1
+    except (ValueError, TypeError) as exc:
+        print(f"build raster failed: {exc}", file=sys.stderr)
+        return 1
+    except OSError as exc:
+        print(f"build raster I/O error: {exc}", file=sys.stderr)
+        return 3
     if backend == "memory":
-        to_geoparquet(cat, out)
-    print(f"wrote {out} ({len(cat)} rows)")
+        code = _write_catalog(cat, out)
+        if code is not None:
+            return code
+    _emit_build_result(out, len(cat), json_output=json_output)
     return 0
 
 
@@ -148,20 +194,36 @@ def xarray(
         str | None,
         Parameter(help="CRS to tag the catalog with (not used to reproject)."),
     ] = None,
+    json_output: Annotated[
+        bool, Parameter(name=["--json"], help="Emit machine-readable JSON.")
+    ] = False,
 ) -> int:
     """Build an xarray-shaped catalog. Requires the `[xarray-raster]` extra."""
     try:
-        from geocatalog import build_xarray_catalog, to_geoparquet
+        from geocatalog import build_xarray_catalog
     except ImportError as exc:
         print(f"build xarray needs the [xarray-raster] extra: {exc}", file=sys.stderr)
         return 1
-    paths = _expand_glob(input_glob)
+    try:
+        paths = _expand_glob(input_glob)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
     if not paths:
         print(f"no files matched {input_glob!r}", file=sys.stderr)
         return 1
-    cat = build_xarray_catalog(paths, time_var=time_var, target_crs=target_crs)
-    to_geoparquet(cat, out)
-    print(f"wrote {out} ({len(cat)} rows)")
+    try:
+        cat = build_xarray_catalog(paths, time_var=time_var, target_crs=target_crs)
+    except (ValueError, TypeError) as exc:
+        print(f"build xarray failed: {exc}", file=sys.stderr)
+        return 1
+    except OSError as exc:
+        print(f"build xarray I/O error: {exc}", file=sys.stderr)
+        return 3
+    code = _write_catalog(cat, out)
+    if code is not None:
+        return code
+    _emit_build_result(out, len(cat), json_output=json_output)
     return 0
 
 
@@ -180,26 +242,42 @@ def vector(
         str, Parameter(help="strptime fmt for regex date groups.")
     ] = "%Y%m%d",
     target_crs: Annotated[str | None, Parameter(help="Catalog CRS.")] = None,
+    json_output: Annotated[
+        bool, Parameter(name=["--json"], help="Emit machine-readable JSON.")
+    ] = False,
 ) -> int:
     """Build a vector catalog (Shapefile / GeoPackage / GeoJSON)."""
     try:
-        from geocatalog import build_vector_catalog, to_geoparquet
+        from geocatalog import build_vector_catalog
     except ImportError as exc:
         print(f"build vector failed: {exc}", file=sys.stderr)
         return 1
-    paths = _expand_glob(input_glob)
+    try:
+        paths = _expand_glob(input_glob)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
     if not paths:
         print(f"no files matched {input_glob!r}", file=sys.stderr)
         return 1
-    cat = build_vector_catalog(
-        paths,
-        filename_regex=regex,
-        date_format=date_format,
-        target_crs=target_crs,
-        layer=layer,
-    )
-    to_geoparquet(cat, out)
-    print(f"wrote {out} ({len(cat)} rows)")
+    try:
+        cat = build_vector_catalog(
+            paths,
+            filename_regex=regex,
+            date_format=date_format,
+            target_crs=target_crs,
+            layer=layer,
+        )
+    except (ValueError, TypeError) as exc:
+        print(f"build vector failed: {exc}", file=sys.stderr)
+        return 1
+    except OSError as exc:
+        print(f"build vector I/O error: {exc}", file=sys.stderr)
+        return 3
+    code = _write_catalog(cat, out)
+    if code is not None:
+        return code
+    _emit_build_result(out, len(cat), json_output=json_output)
     return 0
 
 
@@ -208,8 +286,21 @@ def vector(
 # ---------------------------------------------------------------------------
 
 
-def _open_catalog(source: Path):
+def _open_catalog(source: Path) -> Any:
     """Open a catalog artifact, mapping errors to CLI exit codes.
+
+    Uses ``engine='auto'`` so the DuckDB backend (lazy, scales) is
+    preferred when the ``[duckdb]`` extra is installed — `stats` /
+    `query` are correspondingly cheap on large artifacts. The
+    in-memory backend is the fallback.
+
+    Exit codes:
+
+    * 3 — file missing or not readable (checked before opening so we
+      catch the DuckDB / pyarrow surface error consistently across
+      backends).
+    * 2 — file is present and readable but the open failed (corrupt
+      parquet, unknown column layout, schema-version mismatch).
 
     Returns the opened catalog directly; the caller is expected to
     propagate any raised SystemExit through.
@@ -219,11 +310,44 @@ def _open_catalog(source: Path):
     if not source.exists():
         print(f"catalog not found: {source}", file=sys.stderr)
         raise SystemExit(3)
+    # Filesystem-level readability check before handing off. DuckDB
+    # surfaces permission errors as `duckdb.IOException` (not
+    # `OSError`), and geopandas' pyarrow path mostly raises `OSError`
+    # but not always — pre-checking access keeps the exit-code mapping
+    # well-defined regardless of which backend `engine='auto'` lands on.
+    if source.is_file() and not os.access(source, os.R_OK):
+        print(f"could not read {source}: permission denied", file=sys.stderr)
+        raise SystemExit(3)
     try:
-        return open_catalog(source, engine="memory")
+        return open_catalog(source)
+    except OSError as exc:
+        print(f"could not read {source}: {exc}", file=sys.stderr)
+        raise SystemExit(3) from exc
     except (ValueError, KeyError) as exc:
         print(f"corrupt or unrecognised catalog ({source}): {exc}", file=sys.stderr)
         raise SystemExit(2) from exc
+    except Exception as exc:
+        # DuckDB raises its own DatabaseError subclasses (IOException,
+        # InvalidInputException, …) that don't inherit from OSError or
+        # ValueError. Inspect the message to land on the right exit
+        # code — pre-check above handles the common "permission denied"
+        # path, so anything reaching here is treated as a catalog
+        # error rather than I/O.
+        print(f"failed to open catalog ({source}): {exc}", file=sys.stderr)
+        raise SystemExit(2) from exc
+
+
+def _catalog_crs(cat: Any) -> str:
+    """Backend-agnostic CRS readout (`InMemoryGeoCatalog` and `DuckDBGeoCatalog`).
+
+    `DuckDBGeoCatalog` exposes ``.crs`` directly; `InMemoryGeoCatalog`
+    routes through ``cat.gdf.crs``. Both backends populate
+    ``cat.get_config()["crs"]``, so we read from there to avoid
+    materialising the relation just to print metadata.
+    """
+    config = cat.get_config()
+    crs = config.get("crs")
+    return "" if crs is None else str(crs)
 
 
 @app.command
@@ -240,16 +364,37 @@ def query(
         bool, Parameter(name=["--json"], help="Emit machine-readable JSON.")
     ] = False,
 ) -> int:
-    """Filter ``source`` by bbox + time and print the matching row count."""
-    cat = _open_catalog(source)
-    bounds = _parse_bbox(bbox) if bbox else None
-    time = None
-    if start is not None or end is not None:
-        time = (
-            pd.Timestamp(start) if start else None,
-            pd.Timestamp(end) if end else None,
+    """Filter ``source`` by bbox + time and print the matching row count.
+
+    ``--start`` and ``--end`` are paired — pass either both or neither.
+    `_coerce_interval` requires two timestamp-likes, so passing one
+    half of the window would otherwise crash; we fail fast with exit 1
+    instead.
+    """
+    if (start is None) != (end is None):
+        print(
+            "--start and --end must be passed together (or both omitted)",
+            file=sys.stderr,
         )
-    result = cat.query(bounds=bounds, crs=crs, time=time)
+        return 1
+    try:
+        bounds = _parse_bbox(bbox) if bbox else None
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    time: tuple[Any, Any] | None = None
+    if start is not None and end is not None:
+        try:
+            time = (pd.Timestamp(start), pd.Timestamp(end))
+        except (ValueError, TypeError) as exc:
+            print(f"invalid --start / --end timestamp: {exc}", file=sys.stderr)
+            return 1
+    cat = _open_catalog(source)
+    try:
+        result = cat.query(bounds=bounds, crs=crs, time=time)
+    except (ValueError, TypeError) as exc:
+        print(f"query failed: {exc}", file=sys.stderr)
+        return 1
     _emit(
         {
             "source": str(source),
@@ -270,7 +415,12 @@ def stats(
         bool, Parameter(name=["--json"], help="Emit machine-readable JSON.")
     ] = False,
 ) -> int:
-    """Print rows / bounds / temporal extent / backend / CRS for ``source``."""
+    """Print rows / bounds / temporal extent / backend / CRS for ``source``.
+
+    Uses the Protocol-level ``total_bounds`` / ``temporal_extent`` /
+    ``backend`` properties + ``get_config()`` for CRS — none of these
+    materialise the relation through pandas on the DuckDB backend.
+    """
     cat = _open_catalog(source)
     extent = cat.temporal_extent
     _emit(
@@ -280,7 +430,7 @@ def stats(
             "temporal_start": extent.left,
             "temporal_end": extent.right,
             "backend": cat.backend,
-            "crs": str(cat.gdf.crs),
+            "crs": _catalog_crs(cat),
         },
         as_json=json_output,
     )
@@ -296,7 +446,13 @@ def info(
         bool, Parameter(name=["--json"], help="Emit machine-readable JSON.")
     ] = False,
 ) -> int:
-    """Show one row of ``source`` in detail."""
+    """Show one row of ``source`` in detail.
+
+    Reads via ``cat.gdf`` — the DuckDB backend will materialise the
+    relation through pandas here. Acceptable because the user asked
+    for one specific row; if it ever matters in practice we can
+    swap to a SQL ``LIMIT 1 OFFSET N`` shortcut on `DuckDBGeoCatalog`.
+    """
     cat = _open_catalog(source)
     if row < 0 or row >= len(cat):
         print(f"row {row} out of range [0, {len(cat)})", file=sys.stderr)
