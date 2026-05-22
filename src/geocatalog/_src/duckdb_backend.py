@@ -56,7 +56,9 @@ except ImportError:  # pragma: no cover - exercised via the [duckdb] extra
 
 
 _BACKEND_T = Literal["raster", "xarray", "vector"]
-_BACKEND_TAG_CACHE: WeakKeyDictionary[Any, dict[str, _BACKEND_T]] = WeakKeyDictionary()
+_BACKEND_TAG_CACHE: WeakKeyDictionary[
+    duckdb_mod.DuckDBPyConnection, dict[str, _BACKEND_T]
+] = WeakKeyDictionary()
 
 
 def _require_duckdb() -> Any:
@@ -635,14 +637,14 @@ class DuckDBGeoCatalog:
         )
 
     @cached_property
-    def _len_cached(self) -> int:
-        """Number of rows — runs one COUNT(*) query."""
+    def _row_count(self) -> int:
+        """Cached row count from one COUNT(*) query."""
         df = self.relation.aggregate("COUNT(*) AS n").df()
         return int(df["n"].iloc[0])
 
     def __len__(self) -> int:
         """Number of rows — cached after one COUNT(*) query."""
-        return self._len_cached
+        return self._row_count
 
     def __repr__(self) -> str:
         return (
