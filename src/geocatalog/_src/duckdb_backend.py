@@ -79,8 +79,15 @@ def _ensure_spatial(con: duckdb_mod.DuckDBPyConnection) -> None:
     every code path that constructs a `DuckDBGeoCatalog` goes through the
     same setup.
     """
-    con.execute("INSTALL spatial")
-    con.execute("LOAD spatial")
+    dd = _require_duckdb()
+    try:
+        con.execute("LOAD spatial")
+    except dd.Error:
+        try:
+            con.execute("INSTALL spatial")
+            con.execute("LOAD spatial")
+        except dd.Error:
+            return
 
 
 def _scheme(source: str | Path) -> str | None:
@@ -224,7 +231,6 @@ class DuckDBGeoCatalog:
         dd = _require_duckdb()
         con = dd.connect()
         _ensure_spatial(con)
-        source_str = str(source)
         if storage_options is not None:
             raise ValueError(
                 "DuckDBGeoCatalog does not support storage_options. Use "
@@ -232,6 +238,8 @@ class DuckDBGeoCatalog:
                 "for fsspec-backed reads (loads the full catalog into memory), "
                 "or configure DuckDB credentials directly."
             )
+        source_str = _read_parquet_source(source)
+        partitioned = _is_partitioned_source(source)
         scheme = _scheme(source)
         if scheme in ("s3", "gs", "gcs", "https", "http", "r2", "hf"):
             con.execute("INSTALL httpfs")
@@ -261,18 +269,28 @@ class DuckDBGeoCatalog:
                 con,
                 source_str,
                 default="raster",
+                partitioned=partitioned,
                 retries=retries,
             )
-        retry_transient_io(_check_schema_version, con, source_str, retries=retries)
+        retry_transient_io(
+            _check_schema_version,
+            con,
+            source_str,
+            partitioned=partitioned,
+            retries=retries,
+        )
         # Parameter binding (rather than f-string interpolation) keeps
         # paths containing apostrophes — `s3://bucket/o'malley/cat.parquet`
         # or tmpdirs under a username with one — from breaking the
         # query, and avoids opening a SQL-injection surface if `source`
         # ever flows from untrusted input.
+        # `hive_partitioning` is conditional: enabling it on a single
+        # file under a `key=value` directory would inject a synthetic
+        # partition column into the schema.
         relation = retry_transient_io(
             con.sql,
-            "SELECT * FROM read_parquet($src)",
-            params={"src": source_str},
+            "SELECT * FROM read_parquet($src, hive_partitioning = $hive)",
+            params={"src": source_str, "hive": partitioned},
             retries=retries,
         )
         return cls(relation, con=con, crs=crs, backend=backend)
@@ -757,14 +775,23 @@ def _read_geoparquet_crs(source: str | Path, *, default: str) -> Any:
     Parquet file metadata (`pyarrow` exposes it as raw bytes). This
     helper decodes it via `pyproj.CRS.from_user_input` so the DuckDB
     backend can carry the catalog CRS even though DuckDB itself ignores
-    the GeoParquet column metadata. Directories / globs fall back to
-    the default — we'd need to inspect one shard to know better.
+    the GeoParquet column metadata.
+
+    Directory sources are special-cased: we walk ``rglob("*.parquet")``
+    and inspect the first shard found. All shards written by
+    `StreamingParquetWriter` carry the same CRS, so one is
+    representative. Glob *strings* (``"shards/*.parquet"`` etc.) still
+    fall back to the default — there's no unambiguous "first shard" of
+    an arbitrary glob pattern without re-implementing the glob
+    expansion.
     """
     import json
 
     import pyarrow.parquet as pq
 
     path = Path(source)
+    if path.is_dir():
+        path = next(path.rglob("*.parquet"), path)
     if not path.is_file():
         return default
     try:
@@ -785,7 +812,9 @@ def _read_geoparquet_crs(source: str | Path, *, default: str) -> Any:
     return pyproj.CRS.from_user_input(crs_val)
 
 
-def _check_schema_version(con: duckdb_mod.DuckDBPyConnection, source: str) -> None:
+def _check_schema_version(
+    con: duckdb_mod.DuckDBPyConnection, source: str, *, partitioned: bool = False
+) -> None:
     """Raise `CatalogSchemaError` if the artifact's `_schema_version` is unsupported.
 
     Aggregates the reserved ``_schema_version`` column across *every*
@@ -816,8 +845,8 @@ def _check_schema_version(con: duckdb_mod.DuckDBPyConnection, source: str) -> No
     try:
         df = con.sql(
             "SELECT MIN(_schema_version) AS lo, MAX(_schema_version) AS hi "
-            "FROM read_parquet($src)",
-            params={"src": source},
+            "FROM read_parquet($src, hive_partitioning = $hive)",
+            params={"src": source, "hive": partitioned},
         ).df()
     except dd.BinderException:
         # Missing `_schema_version` column — externally produced parquet.
@@ -854,7 +883,11 @@ def _check_schema_version(con: duckdb_mod.DuckDBPyConnection, source: str) -> No
 
 
 def _read_backend_tag(
-    con: duckdb_mod.DuckDBPyConnection, source: str, *, default: _BACKEND_T
+    con: duckdb_mod.DuckDBPyConnection,
+    source: str,
+    *,
+    default: _BACKEND_T,
+    partitioned: bool = False,
 ) -> _BACKEND_T:
     """Recover the ``_backend`` column written by `to_geoparquet`.
 
@@ -875,8 +908,9 @@ def _read_backend_tag(
     dd = _require_duckdb()
     try:
         df = con.sql(
-            "SELECT _backend FROM read_parquet($src) LIMIT 1",
-            params={"src": source},
+            "SELECT _backend FROM read_parquet($src, hive_partitioning = $hive) "
+            "LIMIT 1",
+            params={"src": source, "hive": partitioned},
         ).df()
     except dd.BinderException:
         # Missing `_backend` column — externally produced parquet.
@@ -927,6 +961,31 @@ def _cache_backend_tag(
         except TypeError:
             return
     source_cache[source] = tag
+
+
+def _read_parquet_source(source: str | Path) -> str:
+    """Return a DuckDB `read_parquet` source for files or partitioned dirs."""
+    path = Path(source)
+    if path.is_dir():
+        return str(path / "**" / "*.parquet")
+    return str(source)
+
+
+def _is_partitioned_source(source: str | Path) -> bool:
+    """True for directories/globs, False for single-file paths.
+
+    Hive partitioning must only be enabled when DuckDB is scanning a
+    tree of shards (or a glob) — turning it on for a single-file
+    source that happens to sit under a ``key=value`` directory injects
+    synthetic partition columns (e.g. ``year``) that the catalog
+    schema shouldn't carry.
+    """
+    if isinstance(source, str) and ("*" in source or "?" in source):
+        return True
+    try:
+        return Path(source).is_dir()
+    except (TypeError, ValueError):
+        return False
 
 
 def _df_to_inmemory(

@@ -48,10 +48,12 @@ def fake_duckdb(monkeypatch: pytest.MonkeyPatch) -> _FakeConnection:
     monkeypatch.setattr(
         duckdb_backend,
         "_read_backend_tag",
-        lambda con, source, *, default: default,
+        lambda con, source, *, default, partitioned=False: default,
     )
     monkeypatch.setattr(
-        duckdb_backend, "_check_schema_version", lambda con, source: None
+        duckdb_backend,
+        "_check_schema_version",
+        lambda con, source, *, partitioned=False: None,
     )
     return con
 

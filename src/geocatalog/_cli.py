@@ -110,6 +110,16 @@ def _emit_build_result(out: Path, n_rows: int, *, json_output: bool) -> None:
         print(f"wrote {out} ({n_rows} rows)")
 
 
+def _parse_partition_by(value: str | None) -> tuple[str, ...] | None:
+    """Parse ``"year,month"`` into a tuple of Hive partition columns."""
+    if value is None:
+        return None
+    parts = tuple(part.strip() for part in value.split(",") if part.strip())
+    if not parts:
+        raise ValueError("--partition-by must name at least one column")
+    return parts
+
+
 # ---------------------------------------------------------------------------
 # build
 # ---------------------------------------------------------------------------
@@ -480,6 +490,48 @@ def migrate(
         print(f"{source} already at v{target}")
     else:
         print(f"wrote {source} (v{v_before} -> v{target})")
+    return 0
+
+
+@app.command
+def convert(
+    source: Annotated[Path, Parameter(help="Input GeoParquet catalog.")],
+    *,
+    out: Annotated[
+        Path | None,
+        Parameter(help="Destination GeoParquet file or directory."),
+    ] = None,
+    partition_by: Annotated[
+        str | None,
+        Parameter(help='Comma-separated Hive partition columns, e.g. "year,month".'),
+    ] = None,
+    json_output: Annotated[
+        bool, Parameter(name=["--json"], help="Emit machine-readable JSON.")
+    ] = False,
+) -> int:
+    """Convert a catalog artifact, optionally to Hive-partitioned layout."""
+    from geocatalog import to_geoparquet
+
+    try:
+        partitions = _parse_partition_by(partition_by)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    cat = _open_catalog(source)
+    materialized = cat.materialize() if hasattr(cat, "materialize") else cat
+    destination = out if out is not None else source.with_suffix("")
+    try:
+        to_geoparquet(materialized, destination, partition_by=partitions)
+    except OSError as exc:
+        print(f"convert I/O error: {exc}", file=sys.stderr)
+        return 3
+    except (ValueError, TypeError, KeyError) as exc:
+        print(f"convert failed: {exc}", file=sys.stderr)
+        return 1
+    _emit(
+        {"source": str(source), "out": str(destination), "rows": len(cat)},
+        as_json=json_output,
+    )
     return 0
 
 

@@ -87,6 +87,18 @@ start_time   2021-01-01 00:00:00
 end_time     2021-01-01 23:59:59.999999
 ```
 
+### `convert`
+
+Rewrite an existing GeoParquet artifact, optionally into a Hive-partitioned
+directory. When `--out` is omitted, `single.parquet` converts to `single/`.
+
+```console
+$ geocatalog convert single.parquet --partition-by year,month
+source  single.parquet
+out     single
+rows    1247891
+```
+
 ## Output formats
 
 Every subcommand accepts `--json` to switch from the human-readable
@@ -116,6 +128,4 @@ $ geocatalog build raster --input-glob "data/*.tif" \
 
 Subcommands deferred to follow-on PRs:
 
-- `geocatalog convert catalog.parquet --partition-by year,month` (#7).
 - `geocatalog compact catalog.parquet` (#8).
-- `geocatalog migrate catalog.parquet --to-version N` (#25).

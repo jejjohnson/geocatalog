@@ -54,6 +54,7 @@ from geocatalog._src.raster import (
     load_raster,
     load_raster_timeseries,
 )
+from geocatalog._src.streaming import append_files
 
 
 # Library hygiene: loguru's recommended pattern is to disable the
@@ -88,6 +89,7 @@ __all__ = [
     "GeoCatalog",
     "GeoSlice",
     "InMemoryGeoCatalog",
+    "append_files",
     "build_raster_catalog",
     "build_vector_catalog",
     "build_xarray_catalog",

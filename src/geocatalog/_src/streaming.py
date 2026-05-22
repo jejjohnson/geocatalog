@@ -30,11 +30,14 @@ import itertools
 import json
 import multiprocessing
 import os
+import shutil
 import tempfile
+import uuid
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pyproj
@@ -551,6 +554,7 @@ def stream_build_duckdb(
     backend: _BACKEND_T,
     write_bbox: bool = True,
     sort_by: tuple[str, ...] | None = ("start_time", "geometry_hilbert"),
+    partition_by: Sequence[str] | None = None,
     batch_size: int = 10_000,
     n_workers: int = 1,
     ordered: bool = False,
@@ -573,6 +577,11 @@ def stream_build_duckdb(
         write_bbox: Emit GeoParquet 1.1 ``bbox`` covering struct.
         sort_by: Sort keys for the post-write rewrite. ``None`` skips the
             rewrite and leaves rows in extraction order.
+        partition_by: Optional Hive partition columns for directory output.
+            Built-in ``"year"``, ``"month"``, and ``"day"`` values are
+            derived from ``start_time``; other names are read from each row.
+            Partitioned output skips the global sort rewrite because the
+            directory layout provides the coarse pruning axis.
         batch_size: Streaming batch size.
         n_workers: Process-pool size for extraction.
         ordered: With ``n_workers>1``, preserve input row order instead of
@@ -608,6 +617,26 @@ def stream_build_duckdb(
         raise FileNotFoundError(
             f"stream_build_duckdb: parent dir does not exist: {out_path.parent}"
         )
+
+    if partition_by is not None:
+        rows = _iter_rows_parallel(filepaths, extract_fn, n_workers=n_workers)
+        rows_written = _write_partitioned_rows(
+            rows,
+            out_path=out_path,
+            crs=crs,
+            backend=backend,
+            partition_by=partition_by,
+            write_bbox=write_bbox,
+            batch_size=batch_size,
+            replace=True,
+        )
+        if rows_written == 0:
+            raise ValueError(
+                "stream_build_duckdb: no files yielded a row (every file "
+                "skipped or unmatched). Existing artifact at out_path "
+                "(if any) was not modified."
+            )
+        return DuckDBGeoCatalog.open(out_path, backend=backend, crs=crs)
 
     # Always stream into a sibling temp file, regardless of `sort_by`.
     # Only move/rename to `out_path` after we've confirmed at least one
@@ -687,3 +716,185 @@ def stream_build_duckdb(
         raise
 
     return DuckDBGeoCatalog.open(out_path, backend=backend, crs=crs)
+
+
+def append_files(
+    archive: str | Path,
+    filepaths: Sequence[str | Path],
+    extract_fn: Callable[[str | Path], dict[str, Any] | None],
+    *,
+    crs: Any,
+    backend: _BACKEND_T,
+    partition_by: Sequence[str],
+    write_bbox: bool = True,
+    batch_size: int = 10_000,
+    n_workers: int = 1,
+) -> DuckDBGeoCatalog:
+    """Append new files to a Hive-partitioned GeoParquet archive.
+
+    Only the new rows are extracted and written; existing shards are left
+    untouched, so append work is ``O(N_new)`` plus the number of new
+    partitions touched. The archive is created if it does not exist.
+
+    Args:
+        archive: Hive-partitioned GeoParquet directory.
+        filepaths: New source files to index.
+        extract_fn: Picklable per-file extractor, same contract as
+            `stream_build_duckdb`.
+        crs: CRS to encode in the new shard metadata.
+        backend: Backend tag for loader dispatch.
+        partition_by: Hive partition columns. ``"year"``, ``"month"``,
+            and ``"day"`` are derived from each row's ``start_time``.
+        write_bbox: Emit the GeoParquet 1.1 ``bbox`` covering struct.
+        batch_size: Rows per Arrow record batch.
+        n_workers: Process-pool size for extraction.
+
+    Returns:
+        A `DuckDBGeoCatalog` opened on the updated archive.
+    """
+    from geocatalog._src.duckdb_backend import DuckDBGeoCatalog, _require_duckdb
+
+    _require_duckdb()
+    archive = Path(archive)
+    if archive.exists() and not archive.is_dir():
+        raise ValueError(f"append_files requires a partitioned directory: {archive}")
+    if archive.parent != Path() and not archive.parent.exists():
+        raise FileNotFoundError(
+            f"append_files: parent dir does not exist: {archive.parent}"
+        )
+    rows = _iter_rows_parallel(filepaths, extract_fn, n_workers=n_workers)
+    rows_written = _write_partitioned_rows(
+        rows,
+        out_path=archive,
+        crs=crs,
+        backend=backend,
+        partition_by=partition_by,
+        write_bbox=write_bbox,
+        batch_size=batch_size,
+        replace=False,
+    )
+    if rows_written == 0:
+        raise ValueError("append_files: no files yielded a row")
+    return DuckDBGeoCatalog.open(archive, backend=backend, crs=crs)
+
+
+def write_partitioned_rows(
+    rows: Iterator[dict[str, Any]],
+    *,
+    out_path: str | Path,
+    crs: Any,
+    backend: _BACKEND_T,
+    partition_by: Sequence[str],
+    schema_version: int = _SCHEMA_VERSION,
+    write_bbox: bool = True,
+    batch_size: int = 10_000,
+    replace: bool = True,
+) -> int:
+    """Write row dicts to a Hive-partitioned GeoParquet directory."""
+    return _write_partitioned_rows(
+        rows,
+        out_path=out_path,
+        crs=crs,
+        backend=backend,
+        partition_by=partition_by,
+        schema_version=schema_version,
+        write_bbox=write_bbox,
+        batch_size=batch_size,
+        replace=replace,
+    )
+
+
+def _write_partitioned_rows(
+    rows: Iterator[dict[str, Any]],
+    *,
+    out_path: str | Path,
+    crs: Any,
+    backend: _BACKEND_T,
+    partition_by: Sequence[str],
+    schema_version: int = _SCHEMA_VERSION,
+    write_bbox: bool = True,
+    batch_size: int = 10_000,
+    replace: bool,
+) -> int:
+    partitions = tuple(partition_by)
+    if not partitions:
+        raise ValueError("partition_by must contain at least one column")
+
+    out_path = Path(out_path)
+    target_dir = out_path.parent if str(out_path.parent) else Path()
+    staging = Path(
+        tempfile.mkdtemp(
+            prefix=out_path.name + ".partitioned.",
+            dir=str(target_dir) if str(target_dir) else None,
+        )
+    )
+    writers: dict[tuple[str, ...], StreamingParquetWriter] = {}
+    rows_written = 0
+    shard_id = uuid.uuid4().hex
+    try:
+        for row in rows:
+            values = tuple(_partition_value(row, name) for name in partitions)
+            writer = writers.get(values)
+            if writer is None:
+                partition_dir = staging.joinpath(
+                    *(
+                        f"{name}={_format_partition_value(value)}"
+                        for name, value in zip(partitions, values, strict=True)
+                    )
+                )
+                partition_dir.mkdir(parents=True, exist_ok=True)
+                shard = partition_dir / f"part-{shard_id}-{len(writers):05d}.parquet"
+                writer = StreamingParquetWriter(
+                    shard,
+                    crs=crs,
+                    backend=backend,
+                    schema_version=schema_version,
+                    write_bbox=write_bbox,
+                    batch_size=batch_size,
+                )
+                writers[values] = writer
+            writer.write_row({k: v for k, v in row.items() if k not in partitions})
+            rows_written += 1
+    except BaseException:
+        for writer in writers.values():
+            writer.close()
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    for writer in writers.values():
+        writer.close()
+
+    if rows_written == 0:
+        shutil.rmtree(staging, ignore_errors=True)
+        return 0
+
+    if replace:
+        if out_path.exists():
+            if not out_path.is_dir():
+                out_path.unlink()
+            else:
+                shutil.rmtree(out_path)
+        os.replace(staging, out_path)
+        return rows_written
+
+    out_path.mkdir(parents=True, exist_ok=True)
+    for shard in staging.rglob("*.parquet"):
+        rel = shard.relative_to(staging)
+        dest = out_path / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(shard, dest)
+    shutil.rmtree(staging, ignore_errors=True)
+    return rows_written
+
+
+def _partition_value(row: dict[str, Any], name: str) -> Any:
+    if name in row and row[name] is not None:
+        return row[name]
+    if name in {"year", "month", "day"}:
+        ts = pd.Timestamp(row["start_time"])
+        return getattr(ts, name)
+    raise KeyError(f"partition column {name!r} not present in row")
+
+
+def _format_partition_value(value: Any) -> str:
+    text = str(value)
+    return text.replace("/", "_").replace("\\", "_").replace("=", "_")

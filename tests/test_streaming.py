@@ -24,6 +24,7 @@ import shapely.geometry
 duckdb = pytest.importorskip("duckdb")
 
 from geocatalog import (
+    append_files,
     build_raster_catalog,
     build_vector_catalog,
     open_catalog,
@@ -45,6 +46,18 @@ def _delayed_row(filepath: str | Path) -> dict[str, Any] | None:
     if index == 2:
         return None
     return {"filepath": str(filepath), "index": index}
+
+
+def _toy_extract(filepath: str | Path) -> dict[str, object]:
+    date = pd.Timestamp(Path(filepath).stem[:10])
+    offset = date.day
+    return {
+        "filepath": str(filepath),
+        "geometry": shapely.geometry.box(offset, 0, offset + 1, 1),
+        "start_time": date,
+        "end_time": date + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1),
+        "crs": "EPSG:4326",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -361,6 +374,66 @@ class TestWorkers:
         b = gpd.read_parquet(out_parallel)
         assert a["filepath"].tolist() == b["filepath"].tolist()
         assert a["start_time"].tolist() == b["start_time"].tolist()
+
+
+# ---------------------------------------------------------------------------
+# Hive partitioning + incremental append
+# ---------------------------------------------------------------------------
+
+
+class TestPartitionedArchives:
+    def test_partitioned_build_opens_via_factory(
+        self, utm29_tile_factory, tmp_path: Path
+    ) -> None:
+        paths = [
+            utm29_tile_factory((500_000, 4_000_000, 500_160, 4_000_160), "20240115"),
+            utm29_tile_factory((500_160, 4_000_000, 500_320, 4_000_160), "20240215"),
+        ]
+        out = tmp_path / "partitioned"
+        catalog = build_raster_catalog(
+            paths,
+            filename_regex=RASTER_REGEX,
+            backend="duckdb",
+            out_path=out,
+            partition_by=("year", "month"),
+        )
+
+        assert out.is_dir()
+        assert (out / "year=2024" / "month=1").is_dir()
+        assert (out / "year=2024" / "month=2").is_dir()
+        reopened = open_catalog(out, engine="duckdb")
+        assert len(reopened) == len(catalog) == 2
+        assert reopened.backend == "raster"
+        assert len(reopened.sql("year = 2024 AND month = 1")) == 1
+
+    def test_append_files_leaves_existing_shards_untouched(
+        self, tmp_path: Path
+    ) -> None:
+        archive = tmp_path / "archive"
+        append_files(
+            archive,
+            [tmp_path / "2024-01-01-a.tif", tmp_path / "2024-01-02-b.tif"],
+            _toy_extract,
+            crs="EPSG:4326",
+            backend="raster",
+            partition_by=("year", "month"),
+        )
+        before = {path: path.stat().st_mtime_ns for path in archive.rglob("*.parquet")}
+
+        catalog = append_files(
+            archive,
+            [tmp_path / "2024-02-01-c.tif"],
+            _toy_extract,
+            crs="EPSG:4326",
+            backend="raster",
+            partition_by=("year", "month"),
+        )
+
+        assert len(catalog) == 3
+        for path, mtime in before.items():
+            assert path.exists()
+            assert path.stat().st_mtime_ns == mtime
+        assert len(list((archive / "year=2024" / "month=2").glob("*.parquet"))) == 1
 
 
 # ---------------------------------------------------------------------------
