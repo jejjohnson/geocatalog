@@ -35,6 +35,7 @@ import pandas as pd
 import pyproj
 import shapely
 import shapely.geometry
+from loguru import logger as log
 
 
 if TYPE_CHECKING:
@@ -86,7 +87,12 @@ def _ensure_spatial(con: duckdb_mod.DuckDBPyConnection) -> None:
         try:
             con.execute("INSTALL spatial")
             con.execute("LOAD spatial")
-        except dd.Error:
+        except dd.Error as exc:
+            log.warning(
+                "DuckDB spatial extension is unavailable; spatial SQL operations "
+                "will fail until the extension can be installed and loaded: {}",
+                exc,
+            )
             return
 
 
@@ -791,7 +797,10 @@ def _read_geoparquet_crs(source: str | Path, *, default: str) -> Any:
 
     path = Path(source)
     if path.is_dir():
-        path = next(path.rglob("*.parquet"), path)
+        first_shard = next(path.rglob("*.parquet"), None)
+        if first_shard is None:
+            raise FileNotFoundError(f"No .parquet files found in directory: {path}")
+        path = first_shard
     if not path.is_file():
         return default
     try:

@@ -819,9 +819,10 @@ def _write_partitioned_rows(
     partitions = tuple(partition_by)
     if not partitions:
         raise ValueError("partition_by must contain at least one column")
+    partition_set = set(partitions)
 
     out_path = Path(out_path)
-    target_dir = out_path.parent if str(out_path.parent) else Path()
+    target_dir = out_path.parent if out_path.parent != Path() else Path()
     staging = Path(
         tempfile.mkdtemp(
             prefix=out_path.name + ".partitioned.",
@@ -843,7 +844,8 @@ def _write_partitioned_rows(
                     )
                 )
                 partition_dir.mkdir(parents=True, exist_ok=True)
-                shard = partition_dir / f"part-{shard_id}-{len(writers):05d}.parquet"
+                partition_shard_id = f"{shard_id}-{uuid.uuid4().hex}"
+                shard = partition_dir / f"part-{partition_shard_id}.parquet"
                 writer = StreamingParquetWriter(
                     shard,
                     crs=crs,
@@ -853,7 +855,7 @@ def _write_partitioned_rows(
                     batch_size=batch_size,
                 )
                 writers[values] = writer
-            writer.write_row({k: v for k, v in row.items() if k not in partitions})
+            writer.write_row({k: v for k, v in row.items() if k not in partition_set})
             rows_written += 1
     except BaseException:
         for writer in writers.values():
