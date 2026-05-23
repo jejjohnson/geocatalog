@@ -137,12 +137,12 @@ class TestLoadRasterTimeseries:
         )
         original_load_raster = raster_module.load_raster
 
-        def slow_first_day(catalog, slice_, **kwargs):
+        def delay_first_day_load(catalog, slice_, **kwargs):
             if slice_.interval.left == pd.Timestamp("2024-01-15"):
                 time.sleep(0.05)
             return original_load_raster(catalog, slice_, **kwargs)
 
-        monkeypatch.setattr(raster_module, "load_raster", slow_first_day)
+        monkeypatch.setattr(raster_module, "load_raster", delay_first_day_load)
 
         tensor = load_raster_timeseries(catalog, sl, n_workers=2)
         # Two days, 3 bands, 32x32.
@@ -175,12 +175,12 @@ class TestLoadRasterTimeseries:
         )
         original_load_raster = raster_module.load_raster
 
-        def fail_middle_day(catalog, slice_, **kwargs):
+        def raise_on_middle_day(catalog, slice_, **kwargs):
             if slice_.interval.left == pd.Timestamp("2024-01-16"):
                 raise ValueError("missing middle day")
             return original_load_raster(catalog, slice_, **kwargs)
 
-        monkeypatch.setattr(raster_module, "load_raster", fail_middle_day)
+        monkeypatch.setattr(raster_module, "load_raster", raise_on_middle_day)
 
         tensor = load_raster_timeseries(catalog, sl, n_workers=2)
         assert tensor.values.shape == (2, 3, 32, 32)
