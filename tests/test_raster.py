@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import time
+
 import numpy as np
 import pandas as pd
 import pytest
 
+import geocatalog._src.raster as raster_module
 from geocatalog import (
     GeoSlice,
     build_raster_catalog,
@@ -112,7 +115,9 @@ class TestLoadRaster:
 
 
 class TestLoadRasterTimeseries:
-    def test_stacks_distinct_days(self, utm29_tile_factory) -> None:
+    def test_stacks_distinct_days_in_time_order(
+        self, utm29_tile_factory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         path_a = utm29_tile_factory(
             (500_000, 4_000_000, 500_320, 4_000_320), "20240115", value=1
         )
@@ -130,6 +135,79 @@ class TestLoadRasterTimeseries:
             resolution=(10.0, 10.0),
             crs="EPSG:32629",
         )
-        tensor = load_raster_timeseries(catalog, sl)
+        original_load_raster = raster_module.load_raster
+
+        def slow_first_day(catalog, slice_, **kwargs):
+            if slice_.interval.left == pd.Timestamp("2024-01-15"):
+                time.sleep(0.05)
+            return original_load_raster(catalog, slice_, **kwargs)
+
+        monkeypatch.setattr(raster_module, "load_raster", slow_first_day)
+
+        tensor = load_raster_timeseries(catalog, sl, n_workers=2)
         # Two days, 3 bands, 32x32.
         assert tensor.values.shape == (2, 3, 32, 32)
+        np.testing.assert_array_equal(tensor.values[0], 1)
+        np.testing.assert_array_equal(tensor.values[1], 2)
+
+    def test_missing_day_skip_and_raise(
+        self, utm29_tile_factory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        path_a = utm29_tile_factory(
+            (500_000, 4_000_000, 500_320, 4_000_320), "20240115", value=1
+        )
+        path_b = utm29_tile_factory(
+            (500_000, 4_000_000, 500_320, 4_000_320), "20240116", value=2
+        )
+        path_c = utm29_tile_factory(
+            (500_000, 4_000_000, 500_320, 4_000_320), "20240117", value=3
+        )
+        catalog = build_raster_catalog([path_a, path_b, path_c], filename_regex=REGEX)
+        sl = GeoSlice(
+            bounds=(500_000, 4_000_000, 500_320, 4_000_320),
+            interval=pd.Interval(
+                pd.Timestamp("2024-01-15"),
+                pd.Timestamp("2024-01-18"),
+                closed="both",
+            ),
+            resolution=(10.0, 10.0),
+            crs="EPSG:32629",
+        )
+        original_load_raster = raster_module.load_raster
+
+        def fail_middle_day(catalog, slice_, **kwargs):
+            if slice_.interval.left == pd.Timestamp("2024-01-16"):
+                raise ValueError("missing middle day")
+            return original_load_raster(catalog, slice_, **kwargs)
+
+        monkeypatch.setattr(raster_module, "load_raster", fail_middle_day)
+
+        tensor = load_raster_timeseries(catalog, sl, n_workers=2)
+        assert tensor.values.shape == (2, 3, 32, 32)
+        np.testing.assert_array_equal(tensor.values[0], 1)
+        np.testing.assert_array_equal(tensor.values[1], 3)
+        with pytest.raises(ValueError, match="missing middle day"):
+            load_raster_timeseries(catalog, sl, n_workers=2, on_missing_day="raise")
+
+    def test_n_workers_one_matches_concurrent(self, utm29_tile_factory) -> None:
+        path_a = utm29_tile_factory(
+            (500_000, 4_000_000, 500_320, 4_000_320), "20240115", value=1
+        )
+        path_b = utm29_tile_factory(
+            (500_000, 4_000_000, 500_320, 4_000_320), "20240116", value=2
+        )
+        catalog = build_raster_catalog([path_a, path_b], filename_regex=REGEX)
+        sl = GeoSlice(
+            bounds=(500_000, 4_000_000, 500_320, 4_000_320),
+            interval=pd.Interval(
+                pd.Timestamp("2024-01-15"),
+                pd.Timestamp("2024-01-17"),
+                closed="both",
+            ),
+            resolution=(10.0, 10.0),
+            crs="EPSG:32629",
+        )
+
+        serial = load_raster_timeseries(catalog, sl, n_workers=1)
+        concurrent = load_raster_timeseries(catalog, sl, n_workers=2)
+        np.testing.assert_array_equal(serial.values, concurrent.values)
