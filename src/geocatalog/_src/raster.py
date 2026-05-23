@@ -32,6 +32,7 @@ from rasterio.vrt import WarpedVRT
 
 from geocatalog._src.geoslice import GeoSlice
 from geocatalog._src.memory import InMemoryGeoCatalog
+from geocatalog._src.retry import retry_transient_io
 
 
 if TYPE_CHECKING:
@@ -67,9 +68,10 @@ def _filepath_to_row(
     filename_regex: re.Pattern[str] | None,
     date_format: str,
     target_crs: Any | None,
+    retries: int = 3,
 ) -> dict[str, Any] | None:
     filepath = Path(filepath)
-    with rasterio.open(filepath) as src:
+    with retry_transient_io(rasterio.open, filepath, retries=retries) as src:
         if target_crs is None:
             crs = src.crs
             bounds = src.bounds
@@ -301,6 +303,7 @@ def load_raster(
     resampling: Any | None = None,
     merge_method: _RasterMergeMethod = "last",
     nodata: float | None = None,
+    retries: int = 3,
 ) -> GeoTensor:
     """Read + mosaic the catalog rows matching ``slice_`` into one `GeoTensor`.
 
@@ -327,6 +330,8 @@ def load_raster(
             rasterio mode and is rejected (§7.7 of the design plan).
         nodata: Override the nodata value used in the mosaic. ``None``
             respects each source's declared ``_FillValue`` / ``nodata``.
+        retries: Number of retries for transient remote I/O failures.
+            ``0`` disables retry/backoff.
 
     Returns:
         A `GeoTensor` of shape ``(bands, H, W)`` with ``transform`` and
@@ -355,7 +360,7 @@ def load_raster(
     handles = []
     try:
         for fp in filtered.gdf["filepath"].tolist():
-            src = rasterio.open(fp)
+            src = retry_transient_io(rasterio.open, fp, retries=retries)
             handles.append(src)
             sources.append(src)
         target_resolution = slice_.resolution
