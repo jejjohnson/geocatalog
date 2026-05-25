@@ -281,9 +281,6 @@ class DuckDBGeoCatalog:
         Returns:
             A `DuckDBGeoCatalog` over the relation.
         """
-        dd = _require_duckdb()
-        con = dd.connect()
-        _ensure_spatial(con)
         if storage_options is not None:
             raise ValueError(
                 "DuckDBGeoCatalog does not support storage_options. Use "
@@ -291,61 +288,70 @@ class DuckDBGeoCatalog:
                 "for fsspec-backed reads (loads the full catalog into memory), "
                 "or configure DuckDB credentials directly."
             )
-        source_str = _read_parquet_source(source)
-        partitioned = _is_partitioned_source(source)
-        scheme = _scheme(source)
-        if scheme in ("s3", "gs", "gcs", "https", "http", "r2", "hf"):
-            con.execute("INSTALL httpfs")
-            con.execute("LOAD httpfs")
-        elif scheme in ("az", "azure"):
-            con.execute("INSTALL azure")
-            con.execute("LOAD azure")
-        if crs is None:
-            if scheme is not None:
-                warnings.warn(
-                    f"DuckDBGeoCatalog.open({source_str!r}): cannot auto-detect "
-                    "CRS from a remote URI; falling back to EPSG:4326. Pass "
-                    "`crs=` explicitly for remote sources to avoid silent "
-                    "default coercion.",
-                    UserWarning,
-                    stacklevel=2,
+        dd = _require_duckdb()
+        con = dd.connect()
+        try:
+            _ensure_spatial(con)
+            source_str = _read_parquet_source(source)
+            partitioned = _is_partitioned_source(source)
+            scheme = _scheme(source)
+            if scheme in ("s3", "gs", "gcs", "https", "http", "r2", "hf"):
+                con.execute("INSTALL httpfs")
+                con.execute("LOAD httpfs")
+            elif scheme in ("az", "azure"):
+                con.execute("INSTALL azure")
+                con.execute("LOAD azure")
+            if crs is None:
+                if scheme is not None:
+                    warnings.warn(
+                        f"DuckDBGeoCatalog.open({source_str!r}): cannot auto-detect "
+                        "CRS from a remote URI; falling back to EPSG:4326. Pass "
+                        "`crs=` explicitly for remote sources to avoid silent "
+                        "default coercion.",
+                        UserWarning,
+                        stacklevel=2,
+                    )
+                crs = retry_transient_io(
+                    _read_geoparquet_crs,
+                    source,
+                    default="EPSG:4326",
+                    retries=retries,
                 )
-            crs = retry_transient_io(
-                _read_geoparquet_crs,
-                source,
-                default="EPSG:4326",
-                retries=retries,
-            )
-        if backend is None:
-            backend = retry_transient_io(
-                _read_backend_tag,
+            if backend is None:
+                backend = retry_transient_io(
+                    _read_backend_tag,
+                    con,
+                    source_str,
+                    default="raster",
+                    partitioned=partitioned,
+                    retries=retries,
+                )
+            retry_transient_io(
+                _check_schema_version,
                 con,
                 source_str,
-                default="raster",
                 partitioned=partitioned,
                 retries=retries,
             )
-        retry_transient_io(
-            _check_schema_version,
-            con,
-            source_str,
-            partitioned=partitioned,
-            retries=retries,
-        )
-        # Parameter binding (rather than f-string interpolation) keeps
-        # paths containing apostrophes — `s3://bucket/o'malley/cat.parquet`
-        # or tmpdirs under a username with one — from breaking the
-        # query, and avoids opening a SQL-injection surface if `source`
-        # ever flows from untrusted input.
-        # `hive_partitioning` is conditional: enabling it on a single
-        # file under a `key=value` directory would inject a synthetic
-        # partition column into the schema.
-        relation = retry_transient_io(
-            con.sql,
-            "SELECT * FROM read_parquet($src, hive_partitioning = $hive)",
-            params={"src": source_str, "hive": partitioned},
-            retries=retries,
-        )
+            # Parameter binding (rather than f-string interpolation) keeps
+            # paths containing apostrophes — `s3://bucket/o'malley/cat.parquet`
+            # or tmpdirs under a username with one — from breaking the
+            # query, and avoids opening a SQL-injection surface if `source`
+            # ever flows from untrusted input.
+            # `hive_partitioning` is conditional: enabling it on a single
+            # file under a `key=value` directory would inject a synthetic
+            # partition column into the schema.
+            relation = retry_transient_io(
+                con.sql,
+                "SELECT * FROM read_parquet($src, hive_partitioning = $hive)",
+                params={"src": source_str, "hive": partitioned},
+                retries=retries,
+            )
+        except BaseException:
+            # Setup failed (bad extension load, schema mismatch, IO error);
+            # don't leak the freshly opened connection.
+            con.close()
+            raise
         return cls(relation, con=con, crs=crs, backend=backend, _owns_con=True)
 
     @classmethod
@@ -364,7 +370,9 @@ class DuckDBGeoCatalog:
         Args:
             catalog: The in-memory catalog to wrap.
             con: Optional DuckDB connection to register into. A fresh
-                in-memory connection is created if omitted.
+                in-memory connection is created if omitted; ownership
+                of an externally supplied connection stays with the
+                caller (close is a no-op for it).
 
         Returns:
             A `DuckDBGeoCatalog` over a view of the same rows. The view
@@ -372,18 +380,30 @@ class DuckDBGeoCatalog:
             place after this call leads to undefined behaviour.
         """
         dd = _require_duckdb()
+        owns_con = con is None
         if con is None:
             con = dd.connect()
-        _ensure_spatial(con)
-        df = _gdf_to_arrow_df(catalog.gdf)
-        view_name = f"_geocatalog_mem_{id(catalog):x}"
-        con.register(view_name, df)
-        relation = con.sql(
-            f"SELECT * EXCLUDE (geometry), "
-            f"  ST_GeomFromWKB(geometry) AS geometry "
-            f"FROM {view_name}"
+        try:
+            _ensure_spatial(con)
+            df = _gdf_to_arrow_df(catalog.gdf)
+            view_name = f"_geocatalog_mem_{id(catalog):x}"
+            con.register(view_name, df)
+            relation = con.sql(
+                f"SELECT * EXCLUDE (geometry), "
+                f"  ST_GeomFromWKB(geometry) AS geometry "
+                f"FROM {view_name}"
+            )
+        except BaseException:
+            if owns_con:
+                con.close()
+            raise
+        return cls(
+            relation,
+            con=con,
+            crs=catalog.gdf.crs,
+            backend=catalog.backend,
+            _owns_con=owns_con,
         )
-        return cls(relation, con=con, crs=catalog.gdf.crs, backend=catalog.backend)
 
     # ── lazy ↔ eager bridges ─────────────────────────────────────────────
 

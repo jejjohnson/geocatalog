@@ -233,6 +233,37 @@ class TestLifecycle:
         ):
             len(filtered)
 
+    def test_close_is_idempotent(self, parquet_two_tiles: Path) -> None:
+        duck = DuckDBGeoCatalog.open(parquet_two_tiles)
+        duck.close()
+        # Second close on an owned-but-already-closed catalog must not
+        # raise — common in `try/finally` cleanup paths.
+        duck.close()
+        assert duck.con is None
+
+    def test_from_memory_owns_fresh_connection(self) -> None:
+        mem = _mem_two_tiles()
+        duck = DuckDBGeoCatalog.from_memory(mem)
+        try:
+            assert duck._owns_con is True
+            assert len(duck) == 2
+        finally:
+            duck.close()
+        assert duck.con is None
+
+    def test_from_memory_does_not_own_external_connection(self) -> None:
+        dd = duckdb.connect()
+        try:
+            mem = _mem_two_tiles()
+            duck = DuckDBGeoCatalog.from_memory(mem, con=dd)
+            assert duck._owns_con is False
+            duck.close()
+            # External connection must still be usable after derived
+            # catalog's close (which is a no-op).
+            assert dd.execute("SELECT 1").fetchone() == (1,)
+        finally:
+            dd.close()
+
 
 class TestQuery:
     def test_spatial_filter(self, parquet_two_tiles: Path) -> None:
