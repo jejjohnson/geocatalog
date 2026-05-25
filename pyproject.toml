@@ -197,7 +197,14 @@ python_files = ["test_*.py", "bench_*.py"]
 # skip it (otherwise every CI run would pay the warmup + repeated-call
 # cost). Invoke explicitly with
 # ``uv run pytest tests/bench --benchmark-only``.
-addopts = "--cov=src/geocatalog --cov-report=term-missing --cov-report=xml:coverage.xml --ignore=tests/bench"
+addopts = "--cov=src/geocatalog --cov-report=term-missing --cov-report=xml:coverage.xml --ignore=tests/bench -m 'not live'"
+markers = [
+    # Tests that hit real external services (Planetary Computer, NASA
+    # CMR, etc.). Skipped by default — `addopts` filters them out — so
+    # CI is deterministic and offline-friendly. Run on demand with
+    # ``uv run pytest -m live --no-cov``.
+    "live: requires network access to a real upstream API",
+]
 
 [tool.coverage.run]
 source = ["src/geocatalog"]
