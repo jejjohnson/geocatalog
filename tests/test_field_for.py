@@ -177,6 +177,57 @@ class TestFieldForErrors:
         with pytest.raises(KeyError, match="assets"):
             field_for(legacy_catalog, "red")
 
+    def test_non_raster_backend_rejected(
+        self, legacy_catalog: InMemoryGeoCatalog
+    ) -> None:
+        # Catalogs whose `backend` doesn't match `mode` must fail
+        # upfront — a vector-backed catalog would otherwise reach
+        # RasterioReader and explode with a less helpful error.
+        vector_cat = InMemoryGeoCatalog(legacy_catalog.gdf, backend="vector")
+        with pytest.raises(ValueError, match="backend='vector'"):
+            field_for(vector_cat)
+
+    def test_windows_drive_path_treated_as_local(self) -> None:
+        # `urlparse("C:/data/tile.tif").scheme` returns "c" on every
+        # platform — without the drive-letter special-case, the
+        # local-path classifier would reject valid Windows paths.
+        from geocatalog._src.staging._field_for import _is_local_path
+
+        assert _is_local_path("C:/data/tile.tif") is True
+        assert _is_local_path("c:/data/tile.tif") is True
+        assert _is_local_path("D:/some/long/path.tif") is True
+        # Real remote schemes are still rejected.
+        assert _is_local_path("https://example.com/tile.tif") is False
+        assert _is_local_path("s3://bucket/tile.tif") is False
+        assert _is_local_path("file:///tmp/tile.tif") is True
+        assert _is_local_path("/tmp/tile.tif") is True
+
+    def test_non_local_uri_in_asset_map_raises_keyerror(
+        self, tmp_path: Path, utm29_tile_factory
+    ) -> None:
+        # `stage(on_error="skip")` leaves the original URI in the asset
+        # map for failed rows. `field_for` must surface that as a clear
+        # KeyError rather than silently building a RasterField pointing
+        # at a remote object.
+        good = utm29_tile_factory(
+            (500_000, 4_000_000, 500_320, 4_000_320), "20240115", value=10
+        )
+        cat = _catalog(
+            rows=[
+                {
+                    "geometry": box(500_000, 4_000_000, 500_320, 4_000_320),
+                    "start_time": pd.Timestamp("2024-01-15"),
+                    "end_time": pd.Timestamp("2024-01-15"),
+                    "filepath": str(good),
+                    "assets": json.dumps(
+                        {"red": str(good), "nir": "https://nope.example/never.tif"}
+                    ),
+                }
+            ]
+        )
+        with pytest.raises(KeyError, match=r"non-local URIs"):
+            field_for(cat, "nir")
+
 
 class TestFieldForImportGuard:
     def test_missing_geopatcher_raises_clear_importerror(
