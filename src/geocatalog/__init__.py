@@ -64,6 +64,11 @@ _logger.disable("geocatalog")
 
 if TYPE_CHECKING:
     from geocatalog._src.duckdb_backend import DuckDBGeoCatalog
+    from geocatalog._src.stac import (
+        from_stac_items,
+        from_stac_search,
+        to_stac_collection,
+    )
     from geocatalog._src.vector import build_vector_catalog, load_vector
     from geocatalog._src.xarray_backend import (
         build_xarray_catalog,
@@ -87,6 +92,8 @@ __all__ = [
     "build_vector_catalog",
     "build_xarray_catalog",
     "from_geoparquet",
+    "from_stac_items",
+    "from_stac_search",
     "intersect",
     "load_raster",
     "load_raster_timeseries",
@@ -97,6 +104,7 @@ __all__ = [
     "query",
     "slice_to_window",
     "to_geoparquet",
+    "to_stac_collection",
     "union",
     "window_to_slice",
 ]
@@ -182,6 +190,9 @@ _LAZY_ATTRS = {
     "build_vector_catalog": ("geocatalog._src.vector",),
     "load_vector": ("geocatalog._src.vector",),
     "DuckDBGeoCatalog": ("geocatalog._src.duckdb_backend",),
+    "from_stac_items": ("geocatalog._src.stac",),
+    "from_stac_search": ("geocatalog._src.stac",),
+    "to_stac_collection": ("geocatalog._src.stac",),
 }
 
 
@@ -205,6 +216,8 @@ def __getattr__(name: str) -> Any:
                 extra = "xarray-raster"
             elif "duckdb" in module_name:
                 extra = "duckdb"
+            elif "stac" in module_name:
+                extra = "stac"
             else:
                 extra = "vector"
             raise ImportError(

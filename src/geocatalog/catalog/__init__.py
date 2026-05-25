@@ -25,6 +25,11 @@ from geocatalog._src.raster import (
 
 if TYPE_CHECKING:
     from geocatalog._src.duckdb_backend import DuckDBGeoCatalog
+    from geocatalog._src.stac import (
+        from_stac_items,
+        from_stac_search,
+        to_stac_collection,
+    )
     from geocatalog._src.vector import build_vector_catalog, load_vector
     from geocatalog._src.xarray_backend import (
         build_xarray_catalog,
@@ -42,6 +47,8 @@ __all__ = [
     "build_vector_catalog",
     "build_xarray_catalog",
     "from_geoparquet",
+    "from_stac_items",
+    "from_stac_search",
     "intersect",
     "load_raster",
     "load_raster_timeseries",
@@ -50,6 +57,7 @@ __all__ = [
     "open_catalog",
     "query",
     "to_geoparquet",
+    "to_stac_collection",
     "union",
 ]
 

@@ -282,8 +282,15 @@ class InMemoryGeoCatalog:
         """
         del batch_size
         crs = pyproj.CRS.from_user_input(self.gdf.crs)
-        reserved = {"geometry", "filepath", "start_time", "end_time"}
-        extra_cols = [c for c in self.gdf.columns if c not in reserved]
+        # Mirror `DuckDBGeoCatalog.iter_rows`: drop the GeoParquet 1.1
+        # `bbox` covering struct and any underscore-prefixed on-disk
+        # schema column (e.g. `_backend`, `_schema_version`) so they
+        # don't leak through `CatalogRow.extras` into downstream
+        # consumers (STAC export, matchup, …).
+        reserved = {"geometry", "filepath", "start_time", "end_time", "bbox"}
+        extra_cols = [
+            c for c in self.gdf.columns if c not in reserved and not c.startswith("_")
+        ]
         # Use ``.array`` rather than ``.to_numpy(copy=False)`` so pandas
         # extension scalars (notably ``Timestamp``) survive iteration with
         # the same types DuckDB's ``Series.iloc[i]`` produces — going
