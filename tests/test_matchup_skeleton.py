@@ -45,16 +45,13 @@ class TestSpatialStrategies:
         for strat in [Intersects(), IouAtLeast(0.2), Contains()]:
             assert isinstance(strat, SpatialStrategy)
 
-    def test_match_not_implemented(self) -> None:
+    def test_strategy_match_returns_bool(self) -> None:
+        # Bodies are implemented; behaviour coverage lives in
+        # tests/test_matchup_engine.py. Skeleton just locks the
+        # bool-return contract.
         b = box(0, 0, 1, 1)
-        with pytest.raises(NotImplementedError):
-            Intersects().match(b, b)
-        with pytest.raises(NotImplementedError):
-            IouAtLeast(0.2).match(b, b)
-        with pytest.raises(NotImplementedError):
-            CentroidWithin(buffer=0.5).match(b, b)
-        with pytest.raises(NotImplementedError):
-            Contains().match(b, b)
+        for strat in [Intersects(), IouAtLeast(0.2), CentroidWithin(0.0), Contains()]:
+            assert isinstance(strat.match(b, b), bool)
 
 
 class TestTemporalStrategies:
@@ -89,16 +86,18 @@ class TestMatchupRow:
 
 
 class TestMatchupEngine:
-    def test_not_implemented(self) -> None:
-        # We only need to confirm the function is reachable and
-        # the signature accepts the documented kwargs.
-        with pytest.raises(NotImplementedError):
-            list(
-                matchup(
-                    catalog=object(),  # type: ignore[arg-type]
-                    primary={"source": "earthaccess"},
-                    secondary={"source": "stac.pc"},
-                    spatial=IouAtLeast(0.2),
-                    temporal=NearestInTime(dt="6h"),
-                )
+    def test_signature_accepts_iterables(self) -> None:
+        # `matchup` now takes iterables of SourceRow (not a Selector
+        # against a GeoCatalog — that wrapper lands once ingest is
+        # wired up). Smoke-check the signature accepts the documented
+        # kwargs without raising; behaviour coverage lives in
+        # tests/test_matchup_engine.py.
+        result = list(
+            matchup(
+                primary=[],
+                secondary=[],
+                spatial=IouAtLeast(0.2),
+                temporal=NearestInTime(dt="6h"),
             )
+        )
+        assert result == []
