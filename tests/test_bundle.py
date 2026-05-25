@@ -251,6 +251,25 @@ class TestIngest:
         # The bundle's QueryRecord still records the new call's UUID.
         assert bundle.queries[0].query_id == new_id
 
+    def test_ingest_does_not_overwrite_adapter_query_tag(self) -> None:
+        # If an adapter already stamped `query_tag` on the row's
+        # provenance, the user's `tag` argument must not clobber it
+        # — same "do not overwrite" contract as `query_id`.
+        bundle = CatalogBundle.empty(target_crs="EPSG:4326")
+        import dataclasses as _dc
+
+        adapter_tagged = _dc.replace(
+            _src_row("a", time=datetime(2024, 6, 14, tzinfo=UTC)),
+            provenance={"query_tag": "adapter_set"},
+        )
+        src = _FakeSource([adapter_tagged])
+        bundle.ingest(src, bounds=(-10, 35, 5, 45), tag="user_tag")
+        prov = json.loads(bundle.catalog.gdf["provenance"].iloc[0])
+        # Adapter's tag wins; bundle-level tag still lives in
+        # QueryRecord.tag for the queries.parquet table.
+        assert prov["query_tag"] == "adapter_set"
+        assert bundle.queries[0].tag == "user_tag"
+
     def test_two_ingests_accumulate(self) -> None:
         bundle = CatalogBundle.empty(target_crs="EPSG:4326")
         src_a = _FakeSource([_src_row("a", time=datetime(2024, 6, 14, tzinfo=UTC))])
@@ -395,6 +414,66 @@ class TestPersistenceRoundTrip:
         d = tmp_path / "not-a-bundle"
         d.mkdir()
         with pytest.raises(FileNotFoundError, match=r"_meta\.json"):
+            CatalogBundle.from_directory(d)
+
+    def test_stale_sidecar_files_cleaned_on_rewrite(self, tmp_path: Path) -> None:
+        # First write: bundle has queries + matchups → sibling files
+        # present.
+        bundle = CatalogBundle.empty(target_crs="EPSG:4326")
+        src_a = _FakeSource([_src_row("a", time=datetime(2024, 6, 14, tzinfo=UTC))])
+        bundle.ingest(src_a, bounds=(-10, 35, 5, 45))
+        bundle.write_matchups(
+            matchup(
+                primary=[_src_row("p", time=datetime(2024, 6, 15, tzinfo=UTC))],
+                secondary=[
+                    _src_row("s", source="o", time=datetime(2024, 6, 15, 1, tzinfo=UTC))
+                ],
+                spatial=Intersects(),
+                temporal=NearestInTime(dt="6h"),
+            )
+        )
+        bundle.to_directory(tmp_path / "cat")
+        assert (tmp_path / "cat" / "queries.parquet").exists()
+        assert (tmp_path / "cat" / "matchups.parquet").exists()
+
+        # Second write: clear the in-memory queries + matchups; rewrite.
+        # The stale sibling files must disappear so a subsequent
+        # `from_directory()` doesn't resurrect them.
+        bundle.queries.clear()
+        bundle.matchups.clear()
+        bundle.to_directory(tmp_path / "cat")
+        assert not (tmp_path / "cat" / "queries.parquet").exists()
+        assert not (tmp_path / "cat" / "matchups.parquet").exists()
+        reloaded = CatalogBundle.from_directory(tmp_path / "cat")
+        assert len(reloaded.queries) == 0
+        assert len(reloaded.matchups) == 0
+
+    def test_from_directory_rejects_unknown_schema_version(
+        self, tmp_path: Path
+    ) -> None:
+        # Tamper _meta.json to claim a future version we don't know
+        # how to read; the loader must fail fast rather than silently
+        # misinterpret the layout.
+        bundle = CatalogBundle.empty(target_crs="EPSG:4326")
+        bundle.to_directory(tmp_path / "cat")
+        meta_path = tmp_path / "cat" / "_meta.json"
+        meta = json.loads(meta_path.read_text())
+        meta["bundle_schema_version"] = 999
+        meta_path.write_text(json.dumps(meta))
+        with pytest.raises(ValueError, match="bundle_schema_version"):
+            CatalogBundle.from_directory(tmp_path / "cat")
+
+    def test_from_directory_rejects_missing_schema_version(
+        self, tmp_path: Path
+    ) -> None:
+        # Pre-versioning bundle (`bundle_schema_version` field absent).
+        d = tmp_path / "cat"
+        CatalogBundle.empty(target_crs="EPSG:4326").to_directory(d)
+        meta_path = d / "_meta.json"
+        meta = json.loads(meta_path.read_text())
+        meta.pop("bundle_schema_version")
+        meta_path.write_text(json.dumps(meta))
+        with pytest.raises(ValueError, match=r"missing.*bundle_schema_version"):
             CatalogBundle.from_directory(d)
 
 

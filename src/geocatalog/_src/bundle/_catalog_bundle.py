@@ -299,8 +299,13 @@ class CatalogBundle:
             # granule UR or doi).
             prov = dict(row.provenance)
             prov.setdefault("query_id", query_id)
+            # Use setdefault so an adapter that already set
+            # `query_tag` on the row's provenance wins (consistent
+            # with the documented "do not overwrite" contract for
+            # query_id). If the user's tag and the adapter's
+            # disagree, prefer the more-specific (adapter-set) one.
             if tag is not None:
-                prov["query_tag"] = tag
+                prov.setdefault("query_tag", tag)
             stamped = dataclasses.replace(row, provenance=prov)
             new_rows.append(
                 source_row_to_gdf_row(
@@ -386,17 +391,28 @@ class CatalogBundle:
               matchups.parquet    (omitted when empty)
               _meta.json
 
-        Existing files inside ``path`` are overwritten.
+        Existing files inside ``path`` are overwritten. Stale
+        ``queries.parquet`` / ``matchups.parquet`` from a previous
+        write are *removed* when the corresponding in-memory list is
+        empty — otherwise `from_directory()` would silently
+        resurrect rows that should have been dropped.
         """
         from geocatalog._src.parquet import to_geoparquet
 
         dest = Path(path)
         dest.mkdir(parents=True, exist_ok=True)
         to_geoparquet(self.catalog, dest / "items.parquet")
+        # Sidecar tables: write when non-empty, otherwise delete any
+        # leftover from a previous write so the on-disk state
+        # matches the in-memory contract (empty = omitted).
         if self.queries:
             _queries_to_parquet(self.queries, dest / "queries.parquet")
+        else:
+            (dest / "queries.parquet").unlink(missing_ok=True)
         if self.matchups:
             _matchups_to_parquet(self.matchups, dest / "matchups.parquet")
+        else:
+            (dest / "matchups.parquet").unlink(missing_ok=True)
         meta = {
             "bundle_schema_version": BUNDLE_SCHEMA_VERSION,
             "target_crs": self.target_crs.to_string(),
@@ -426,6 +442,24 @@ class CatalogBundle:
                 "Was it produced by `to_directory`?"
             )
         meta = json.loads(meta_path.read_text())
+        # Schema-version gate: reject artifacts written by a newer
+        # bundle layout we don't understand. Forward migrations live
+        # alongside the catalog's `_schema_version` chain (parquet.py);
+        # for now there's only one version and no migrations.
+        artifact_version = meta.get("bundle_schema_version")
+        if artifact_version is None:
+            raise ValueError(
+                f"CatalogBundle directory {src!r} `_meta.json` is missing "
+                "`bundle_schema_version`; this bundle predates the version "
+                "field. Inspect / rewrite via the geocatalog CLI's "
+                "migration tools."
+            )
+        if int(artifact_version) > BUNDLE_SCHEMA_VERSION:
+            raise ValueError(
+                f"CatalogBundle directory {src!r} has bundle_schema_version="
+                f"{artifact_version!r}, exceeds reader v{BUNDLE_SCHEMA_VERSION}. "
+                "Upgrade `geocatalog` to read this bundle."
+            )
         target_crs = pyproj.CRS.from_user_input(meta["target_crs"])
         backend: _BACKEND_T = meta.get("backend", "raster")
 
