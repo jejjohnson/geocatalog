@@ -283,16 +283,27 @@ class InMemoryGeoCatalog:
         crs = pyproj.CRS.from_user_input(self.gdf.crs)
         reserved = {"geometry", "filepath", "start_time", "end_time"}
         extra_cols = [c for c in self.gdf.columns if c not in reserved]
-        for interval, row in zip(self.gdf.index, self.gdf.itertuples(), strict=True):
-            row_dict = row._asdict()
-            filepath = row_dict.get("filepath")
+        # Use ``.array`` rather than ``.to_numpy(copy=False)`` so pandas
+        # extension scalars (notably ``Timestamp``) survive iteration with
+        # the same types DuckDB's ``Series.iloc[i]`` produces — going
+        # through NumPy would silently coerce them to ``np.datetime64``
+        # etc. and make ``CatalogRow.extras`` backend-dependent.
+        geoms = self.gdf.geometry.array
+        intervals = self.gdf.index.array
+        paths = self.gdf["filepath"].array if "filepath" in self.gdf.columns else None
+        extras_data = {c: self.gdf[c].array for c in extra_cols}
+        extras_items = tuple(extras_data.items())
+        n_rows = len(self.gdf)
+
+        for i in range(n_rows):
+            filepath = paths[i] if paths is not None else None
             if filepath is None:
-                filepath = str(row_dict.get("Index", ""))
-            extras = {c: row_dict[c] for c in extra_cols if c in row_dict}
+                filepath = str(intervals[i])
+            extras = {c: values[i] for c, values in extras_items}
             yield CatalogRow(
                 filepath=str(filepath),
-                geometry=row_dict["geometry"],
-                interval=interval,
+                geometry=geoms[i],
+                interval=intervals[i],
                 crs=crs,
                 extras=extras,
             )

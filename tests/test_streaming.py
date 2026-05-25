@@ -8,7 +8,9 @@ not installed.
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
+from typing import Any
 
 import geopandas as gpd
 import numpy as np
@@ -27,11 +29,72 @@ from geocatalog import (
     open_catalog,
 )
 from geocatalog._src.duckdb_backend import DuckDBGeoCatalog
-from geocatalog._src.streaming import StreamingParquetWriter
+from geocatalog._src.streaming import StreamingParquetWriter, _iter_rows_parallel
 
 
 RASTER_REGEX = r"S2_T29SND_(?P<date>\d{8})_\d+_\d+\.tif"
 VECTOR_REGEX = r"labels_(?P<date>\d{8})\.gpkg"
+
+
+def _delayed_row(filepath: str | Path) -> dict[str, Any] | None:
+    """Picklable helper for process-pool ordering tests."""
+    index = int(Path(filepath).stem)
+    # Later indices complete faster to exercise ordered output under
+    # non-input completion order.
+    time.sleep((3 - min(index, 3)) * 0.02)
+    if index == 2:
+        return None
+    return {"filepath": str(filepath), "index": index}
+
+
+# ---------------------------------------------------------------------------
+# Parallel row extraction
+# ---------------------------------------------------------------------------
+
+
+class TestIterRowsParallel:
+    def test_ordered_preserves_input_order_with_workers(self, tmp_path: Path) -> None:
+        paths = [tmp_path / f"{i}.tif" for i in range(5)]
+
+        rows = list(
+            _iter_rows_parallel(
+                paths,
+                _delayed_row,
+                n_workers=3,
+                ordered=True,
+            )
+        )
+
+        assert [row["index"] for row in rows] == [0, 1, 3, 4]
+
+    def test_build_raster_forwards_ordered_to_streamer(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        captured: dict[str, Any] = {}
+        sentinel = object()
+
+        def fake_stream_build_duckdb(*args: Any, **kwargs: Any) -> object:
+            captured.update(kwargs)
+            return sentinel
+
+        monkeypatch.setattr(
+            "geocatalog._src.streaming.stream_build_duckdb",
+            fake_stream_build_duckdb,
+        )
+
+        result = build_raster_catalog(
+            [tmp_path / "0.tif"],
+            backend="duckdb",
+            out_path=tmp_path / "cat.parquet",
+            n_workers=2,
+            ordered=True,
+            sort_by=None,
+        )
+
+        assert result is sentinel
+        assert captured["ordered"] is True
+        assert captured["n_workers"] == 2
+        assert captured["sort_by"] is None
 
 
 # ---------------------------------------------------------------------------
