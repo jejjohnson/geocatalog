@@ -15,6 +15,7 @@ import dataclasses
 import functools
 import re
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -387,15 +388,18 @@ def load_raster_timeseries(
     band_indexes: Sequence[int] | None = None,
     resampling: Any | None = None,
     nodata: float | None = None,
+    n_workers: int = 4,
+    on_missing_day: Literal["skip", "raise"] = "skip",
 ) -> GeoTensor:
     """Stack daily mosaics across the slice's interval into ``(time, b, h, w)``.
 
     For each distinct day with matching rows in ``slice_.interval``,
     runs `load_raster` for that day's sub-slice and stacks the results
-    along a new leading time axis. Days without coverage are silently
-    dropped — the time axis is the *observed* day count, not a dense
-    calendar. The transform / CRS come from the last successful day's
-    load (same for every day since the slice is fixed).
+    along a new leading time axis sorted in chronological order. By
+    default, days whose per-day load raises `ValueError` are dropped —
+    the time axis is the *observed* day count, not a dense calendar.
+    The transform / CRS come from the chronologically last successful
+    day's load (same for every day since the slice is fixed).
 
     Args:
         catalog: A raster-backend catalog with at least one row in
@@ -406,6 +410,11 @@ def load_raster_timeseries(
             function for semantics.
         resampling: Forwarded to per-day `load_raster`.
         nodata: Forwarded to per-day `load_raster`.
+        n_workers: Thread-pool size for per-day `load_raster` calls.
+            ``1`` preserves serial execution.
+        on_missing_day: ``"skip"`` preserves the historical behavior of
+            dropping days whose per-day load raises `ValueError`; ``"raise"``
+            propagates the first such error.
 
     Returns:
         A `GeoTensor` of shape ``(T, bands, H, W)`` where ``T`` is the
@@ -415,14 +424,20 @@ def load_raster_timeseries(
         ValueError: If no catalog rows match the slice, or if every
             matching day failed to produce a usable mosaic.
     """
+    if n_workers < 1:
+        raise ValueError(f"n_workers must be >= 1; got {n_workers!r}")
+    if on_missing_day not in ("skip", "raise"):
+        raise ValueError(
+            f"on_missing_day must be one of {{'skip', 'raise'}}; got {on_missing_day!r}"
+        )
+
     filtered = catalog.query(slice_)
     if len(filtered) == 0:
         raise ValueError("load_raster_timeseries: no catalog rows match the slice")
 
     days = sorted({i.left.floor("D") for i in filtered.gdf.index})
-    stacks: list[np.ndarray] = []
-    last: GeoTensor | None = None
-    for day in days:
+
+    def load_day(day: pd.Timestamp) -> tuple[pd.Timestamp, GeoTensor] | None:
         day_interval = pd.Interval(
             day,
             day + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1),
@@ -430,7 +445,7 @@ def load_raster_timeseries(
         )
         day_slice = dataclasses.replace(slice_, interval=day_interval)
         try:
-            day_tensor = load_raster(
+            return day, load_raster(
                 catalog,
                 day_slice,
                 band_indexes=band_indexes,
@@ -438,13 +453,41 @@ def load_raster_timeseries(
                 nodata=nodata,
             )
         except ValueError:
-            continue
-        stacks.append(day_tensor.values)
-        last = day_tensor
+            if on_missing_day == "skip":
+                return None
+            raise
 
-    if last is None:
+    results: list[tuple[pd.Timestamp, GeoTensor]] = []
+    if n_workers == 1:
+        for day in days:
+            result = load_day(day)
+            if result is not None:
+                results.append(result)
+    else:
+        with ThreadPoolExecutor(max_workers=n_workers) as executor:
+            # Submit in day order and consume results in the same order so
+            # that, with on_missing_day="raise", the earliest failing day
+            # raises deterministically regardless of completion order.
+            futures = [executor.submit(load_day, day) for day in days]
+            try:
+                for future in futures:
+                    result = future.result()
+                    if result is not None:
+                        results.append(result)
+            except BaseException:
+                # Cancel any pending work before propagating so large
+                # intervals do not block on already-submitted tasks.
+                for pending in futures:
+                    pending.cancel()
+                executor.shutdown(wait=False, cancel_futures=True)
+                raise
+
+    if not results:
         raise ValueError("load_raster_timeseries: no usable days in interval")
-    stacked = np.stack(stacks, axis=0)
+
+    ordered = [tensor for _, tensor in sorted(results, key=lambda item: item[0])]
+    last = ordered[-1]
+    stacked = np.stack([tensor.values for tensor in ordered], axis=0)
     return GeoTensor(
         values=stacked,
         transform=last.transform,
