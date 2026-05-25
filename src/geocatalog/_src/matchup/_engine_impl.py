@@ -102,14 +102,22 @@ def run_matchup(
                 per_role_survivors[role] = []
                 continue
 
-            # `temporal.filter` returned a subset of `cand_intervals`.
-            # Recover positions by intersecting on (left, right) keys.
-            keep_keys = {(iv.left, iv.right) for iv in keep}
-            narrowed_rows = [
-                row
-                for row in cand_rows
-                if (row.interval.left, row.interval.right) in keep_keys
-            ]
+            # `temporal.filter` returns a subset of `cand_intervals`
+            # **in input position order**. Recover positions by a
+            # parallel sequential walk — preserves both multiplicity
+            # (two candidates with identical intervals) and selector
+            # semantics (NearestInTime returns exactly one position,
+            # not all rows that happen to share the same timestamp).
+            keep_intervals = list(keep)
+            keep_idx = 0
+            narrowed_rows: list[SourceRow] = []
+            for i, cand_iv in enumerate(cand_intervals):
+                if keep_idx >= len(keep_intervals):
+                    break
+                target = keep_intervals[keep_idx]
+                if cand_iv.left == target.left and cand_iv.right == target.right:
+                    narrowed_rows.append(cand_rows[i])
+                    keep_idx += 1
 
             # 3) Spatial truth gate.
             confirmed = [
@@ -143,9 +151,11 @@ def run_matchup(
                     continue
                 members.append(sec_row)
                 roles_out.append(role_name)
-            if len(members) == 1 and join == "all":
-                # Defensive: shouldn't happen because we dropped
-                # primaries with empty roles above.
+            if len(members) == 1:
+                # No secondary made it through under `any` (or
+                # defensively, under `all` — though we already
+                # dropped those above). A primary-only "matchup"
+                # is meaningless; skip it regardless of join.
                 continue
 
             ref_time = _interval_midpoint(primary_row.interval)
@@ -207,12 +217,13 @@ def _strategy_label(spatial: SpatialStrategy, temporal: TemporalStrategy) -> str
 def _dataclass_summary(strategy: Any) -> str:
     """``ClassName(field=value, ...)`` for any dataclass-shaped strategy.
 
-    Falls back to the repr for non-dataclass instances so users with
-    custom strategies don't crash here.
+    Falls back to ``repr(strategy)`` for non-dataclass instances so
+    custom strategies still get their state recorded in the
+    persisted tolerance metadata.
     """
-    cls_name = type(strategy).__name__
     if not dataclasses.is_dataclass(strategy):
-        return cls_name + "()"
+        return repr(strategy)
+    cls_name = type(strategy).__name__
     parts = []
     for field in dataclasses.fields(strategy):
         val = getattr(strategy, field.name)

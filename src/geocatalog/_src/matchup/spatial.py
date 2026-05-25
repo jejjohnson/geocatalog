@@ -90,9 +90,12 @@ class IouAtLeast:
             return False
         union = primary.union(secondary)
         if union.area == 0.0:
-            # Degenerate: both are zero-area (e.g. two points). An
-            # exact intersection is the only way to "match" here.
-            return not intersection.is_empty
+            # Degenerate: both are zero-area (e.g. two points or
+            # crossing LineStrings). Area-based IoU is undefined
+            # for these — treat them as "matching" only if the
+            # geometries are equal, otherwise fail rather than
+            # silently ignoring the threshold.
+            return primary.equals(secondary)
         return (intersection.area / union.area) >= self.threshold
 
 

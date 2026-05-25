@@ -88,10 +88,10 @@ class TestSpatialStrategies:
         assert IouAtLeast(0.5).match(a, a)
 
     def test_iou_below_threshold(self) -> None:
-        # 1-unit overlap on a 4-unit union → IoU = 0.25.
+        # Two 2x1 rectangles sharing a 1x1 overlap:
+        # intersection area = 1, union area = 3, IoU = 1/3 ~= 0.333.
         a = box(0, 0, 2, 1)
         b = box(1, 0, 3, 1)
-        # intersection area = 1, union area = 3, IoU = 0.333
         assert IouAtLeast(0.30).match(a, b)
         assert not IouAtLeast(0.40).match(a, b)
 
@@ -107,6 +107,26 @@ class TestSpatialStrategies:
         a = box(0, 0, 1, 1)
         b = box(2, 2, 3, 3)
         assert not IouAtLeast(0.0).match(a, b)
+
+    def test_iou_zero_area_geoms_only_match_when_equal(self) -> None:
+        # Two zero-area geometries (e.g. crossing LineStrings,
+        # coincident points) can't be measured by an area ratio.
+        # The degenerate branch treats them as matching only when
+        # the geometries are equal — otherwise the threshold would
+        # be silently ignored.
+        from shapely.geometry import LineString, Point
+
+        p1 = Point(1.0, 2.0)
+        p2 = Point(1.0, 2.0)  # equal to p1
+        p3 = Point(3.0, 4.0)  # disjoint
+        assert IouAtLeast(0.5).match(p1, p2)
+        assert not IouAtLeast(0.5).match(p1, p3)
+        # Crossing LineStrings: intersection is a non-empty Point
+        # (area 0), union area 0 too. Not equal as full geometries
+        # → no match, even at threshold=0.
+        crossing_a = LineString([(0, 0), (2, 2)])
+        crossing_b = LineString([(0, 2), (2, 0)])
+        assert not IouAtLeast(0.0).match(crossing_a, crossing_b)
 
     def test_centroid_within_no_buffer(self) -> None:
         # `secondary` is the unit square (centroid at (0.5, 0.5)),
@@ -503,6 +523,108 @@ class TestMatchupNWay:
         # Only primary + s2 — landsat was dropped.
         assert rows[0].member_ids == ("p", "s2_a")
         assert rows[0].member_roles == ("primary", "s2")
+
+
+# ---------------------------------------------------------------------------
+# Position-preserving temporal filter (regression for the P1 review)
+# ---------------------------------------------------------------------------
+
+
+class TestDuplicateTimestampPositions:
+    """`temporal.filter` returns a subset in input position order; the
+    engine must preserve **both multiplicity and position** when
+    mapping back to rows. A set-based key lookup would silently
+    return all rows with the chosen timestamp, breaking selector
+    strategies like `NearestInTime`.
+    """
+
+    def test_nearest_in_time_picks_single_row_among_duplicates(self) -> None:
+        # Two secondaries with identical timestamps (same satellite,
+        # different tiles). NearestInTime should pick exactly one;
+        # the engine's position-preserving recovery should yield
+        # exactly one matchup row, not two.
+        primary = [
+            _row(
+                "p",
+                source="modis",
+                bbox=(-9, 38, -8, 39),
+                time=datetime(2024, 6, 15, 12, tzinfo=UTC),
+            )
+        ]
+        secondaries = [
+            _row(
+                "s2_a",
+                source="s2",
+                bbox=(-9, 38, -8, 39),
+                time=datetime(2024, 6, 15, 14, tzinfo=UTC),
+            ),
+            _row(
+                "s2_b",
+                source="s2",
+                bbox=(-9, 38, -8, 39),
+                # Same timestamp as s2_a.
+                time=datetime(2024, 6, 15, 14, tzinfo=UTC),
+            ),
+        ]
+        rows = list(
+            matchup(
+                primary=primary,
+                secondary=secondaries,
+                spatial=Intersects(),
+                temporal=NearestInTime(dt="6h"),
+            )
+        )
+        # NearestInTime returns one position; the engine must
+        # respect that (not blow up to two rows because the
+        # timestamps happen to be equal).
+        assert len(rows) == 1
+        # Order-preservation: the first matching row is the one
+        # picked (consistent with NearestInTime's tie-break on
+        # first occurrence).
+        assert rows[0].member_ids == ("p", "s2_a")
+
+
+# ---------------------------------------------------------------------------
+# join="any" empty-members guard
+# ---------------------------------------------------------------------------
+
+
+class TestAnyJoinEmptyGuard:
+    """When every secondary role misses under `join="any"`, the
+    engine must not emit a primary-only "matchup" — a row with a
+    single member has no joinable content.
+    """
+
+    def test_any_join_skips_when_all_roles_miss(self) -> None:
+        primary = [
+            _row(
+                "p",
+                source="modis",
+                bbox=(-9, 38, -8, 39),
+                time=datetime(2024, 6, 15, 12, tzinfo=UTC),
+            )
+        ]
+        # Far in time → NearestInTime misses; the empty-role
+        # branch under join="any" must not let a primary-only
+        # row through.
+        far_secondaries = [
+            _row(
+                "s2_far",
+                source="s2",
+                bbox=(-9, 38, -8, 39),
+                time=datetime(2025, 6, 15, 12, tzinfo=UTC),
+            )
+        ]
+        rows = list(
+            matchup(
+                primary=primary,
+                secondary=far_secondaries,
+                spatial=Intersects(),
+                temporal=NearestInTime(dt="1h"),
+                join="any",
+            )
+        )
+        assert rows == []
 
 
 # ---------------------------------------------------------------------------
