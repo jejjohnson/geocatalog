@@ -89,27 +89,27 @@ class TestAdapterStubs:
     raises NotImplementedError on `query` (because the scaffolding
     PR does not implement the body yet)."""
 
-    def test_cmr_query_not_implemented(self) -> None:
-        # CMRSource has no optional-extra dependency (only stdlib),
-        # so it constructs without prerequisites.
+    def test_cmr_constructs_without_extras(self) -> None:
+        # CMRSource is implemented (stdlib-only, no extras); the
+        # behaviour coverage lives in `test_cmr_source.py`. Skeleton
+        # just locks the name + zero-arg construction path.
         from geocatalog._src.sources.cmr import CMRSource
 
         src = CMRSource()
-        with pytest.raises(NotImplementedError):
-            list(src.query((-10, 35, 5, 45)))
+        assert src.name == "cmr"
 
-    def test_earthaccess_requires_extra_or_not_implemented(self) -> None:
-        # Either the extra is missing (ImportError on construction)
-        # or it's present and `query` raises NotImplementedError.
-        # We accept both so this test runs in any install matrix.
+    def test_earthaccess_constructs_when_extra_present(self) -> None:
+        # EarthAccessSource is implemented (behaviour in
+        # `test_earthaccess_source.py`). Without the `[earthaccess]`
+        # extra installed, construction raises ImportError — skip in
+        # that case so this skeleton runs in any matrix.
         try:
             from geocatalog._src.sources.earthaccess import EarthAccessSource
 
             src = EarthAccessSource()
         except ImportError:
             pytest.skip("`earthaccess` extra not installed")
-        with pytest.raises(NotImplementedError):
-            list(src.query((-10, 35, 5, 45)))
+        assert src.name == "earthaccess"
 
     def test_stac_extra_constructs_factory(self) -> None:
         # STACSource is implemented; behaviour is exercised in
