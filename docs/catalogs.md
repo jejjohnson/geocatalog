@@ -261,8 +261,12 @@ What this turns on:
   single writer thread with no contention.
 - **Optional deterministic extraction order** with `ordered=True` — when
   `sort_by=None`, rows follow the input file order instead of process
-  completion order. This is useful for byte-reproducible CI artifacts, at
-  the cost of waiting behind slow-tail files.
+  completion order, giving byte-reproducible CI artifacts. A slow input
+  earlier in the queue stalls every subsequent yield and can temporarily
+  reduce parallelism (workers may sit idle waiting on the next-in-line
+  future). Trade-off: `ordered=False` gives best throughput; `ordered=True`
+  gives reproducible output — prefer the former for skewed workloads and
+  sort post-hoc if you need a stable layout.
 - **EPSG:4326 canonicalization** when `target_crs=None` — the design's
   prescribed wire format for shared GeoParquet artifacts.
 

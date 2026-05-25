@@ -189,7 +189,12 @@ def build_raster_catalog(
             the single in-process writer.
         ordered: With ``backend="duckdb"`` and ``n_workers>1``, preserve
             input row order instead of completion order. Useful for
-            reproducible artifacts when ``sort_by=None``.
+            reproducible artifacts when ``sort_by=None``. A slow input
+            earlier in the queue stalls every subsequent yield and can
+            temporarily reduce parallelism (workers may sit idle waiting
+            on the next-in-line future). Prefer ``ordered=False`` for
+            skewed workloads and sort post-hoc if you need a stable byte
+            layout.
 
     Returns:
         ``InMemoryGeoCatalog`` for ``backend="memory"``, otherwise a

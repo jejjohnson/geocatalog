@@ -81,8 +81,15 @@ def _iter_rows_parallel(
             pool with the ``"spawn"`` start method (rasterio + ``fork``
             deadlocks on macOS — spawn is the portable default).
         ordered: With ``n_workers>1``, yield rows in input order instead
-            of completion order. This can add latency behind slow files
-            but keeps the pending-future buffer bounded by ``n_workers``.
+            of completion order. Keeps the pending-future buffer bounded
+            by ``n_workers``. A slow input EARLIER in the queue stalls
+            every subsequent yield AND can temporarily reduce parallelism
+            (workers may sit idle while the coordinator waits for the
+            next-in-line future before refilling). The cost is most
+            visible on skewed workloads where the first few inputs take
+            much longer than the rest. For workloads with significant
+            variance, prefer ``ordered=False`` and sort post-hoc if you
+            need a stable byte layout.
 
     Yields:
         Row dicts. ``None`` returns from ``extract_fn`` are filtered out
@@ -570,7 +577,11 @@ def stream_build_duckdb(
         n_workers: Process-pool size for extraction.
         ordered: With ``n_workers>1``, preserve input row order instead of
             completion order. Useful for reproducible artifacts when
-            ``sort_by=None``; slow files can delay later yielded rows.
+            ``sort_by=None``. A slow input earlier in the queue stalls
+            every subsequent yield and can temporarily reduce parallelism
+            (workers may sit idle waiting on the next-in-line future).
+            Prefer ``ordered=False`` for skewed workloads and sort
+            post-hoc if you need a stable byte layout.
 
     Returns:
         A `DuckDBGeoCatalog` opened on ``out_path``.
