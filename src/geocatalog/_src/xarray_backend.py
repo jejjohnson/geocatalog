@@ -63,11 +63,22 @@ def _xarray_engine(filepath: str | Path) -> str | None:
     Directories and ``.zarr`` paths use the zarr engine; everything else
     falls through to xarray's default (netcdf4 / h5netcdf). Centralised
     so the build + load paths can't disagree.
+
+    For ``str`` inputs, the scheme is inspected so we don't run ``is_dir()``
+    against a remote URI. Empty schemes (and single-character schemes, which
+    is how ``urlsplit`` parses Windows drive letters like ``C:/...``) are
+    treated as local paths and routed through the ``Path`` branch — this
+    keeps local Zarr directories without a ``.zarr`` suffix working when
+    the caller passes them as strings.
     """
     if isinstance(filepath, Path):
         if filepath.suffix == ".zarr" or filepath.is_dir():
             return "zarr"
         return None
+    scheme = urlsplit(filepath).scheme
+    if not scheme or len(scheme) == 1:
+        # Local path expressed as str (incl. Windows ``C:/...``).
+        return _xarray_engine(Path(filepath))
     if Path(urlsplit(filepath).path).suffix == ".zarr":
         return "zarr"
     return None

@@ -105,3 +105,45 @@ class TestLoadXarray:
         ds.to_netcdf(path)
         with pytest.raises(ValueError, match="target_crs"):
             build_xarray_catalog([path], target_crs=None)
+
+
+class TestXarrayEngineDispatch:
+    """`_xarray_engine` regression coverage for str-vs-Path dispatch.
+
+    `load_xarray` reads filepaths from the catalog as plain strings, so
+    the str branch must mirror the Path branch — both the ``.zarr``
+    suffix check AND the ``is_dir()`` check — otherwise local Zarr
+    directories without a ``.zarr`` suffix silently fall back to the
+    default engine and fail to open.
+    """
+
+    def test_local_zarr_directory_as_str(self, tmp_path: Path) -> None:
+        from geocatalog._src.xarray_backend import _xarray_engine
+
+        store = tmp_path / "store.zarr"
+        store.mkdir()
+        assert _xarray_engine(str(store)) == "zarr"
+
+    def test_local_directory_without_zarr_suffix_as_str(self, tmp_path: Path) -> None:
+        from geocatalog._src.xarray_backend import _xarray_engine
+
+        store = tmp_path / "store"
+        store.mkdir()
+        assert _xarray_engine(str(store)) == "zarr"
+
+    def test_local_netcdf_as_str(self, netcdf_file: Path) -> None:
+        from geocatalog._src.xarray_backend import _xarray_engine
+
+        assert _xarray_engine(str(netcdf_file)) is None
+
+    def test_remote_zarr_uri(self) -> None:
+        from geocatalog._src.xarray_backend import _xarray_engine
+
+        assert _xarray_engine("s3://bucket/store.zarr") == "zarr"
+
+    def test_remote_netcdf_uri(self) -> None:
+        from geocatalog._src.xarray_backend import _xarray_engine
+
+        # Remote non-zarr URIs must NOT trigger `Path.is_dir()` against a
+        # non-existent local path; they fall through to the default engine.
+        assert _xarray_engine("s3://bucket/data.nc") is None

@@ -92,3 +92,36 @@ def test_uri_name_handles_cloud_paths() -> None:
     assert _uri_name("s3://bucket/prefix/S2_T29SND_20240115.tif") == (
         "S2_T29SND_20240115.tif"
     )
+
+
+def test_resolve_uri_zarr_returns_mapper(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Zarr URIs route through ``fsspec.get_mapper`` rather than ``.open()``.
+
+    A single binary handle can't represent a directory-/mapping-based store,
+    so the resolver must dispatch on the ``.zarr`` suffix.
+    """
+    mapper_calls: list[tuple[str, dict[str, object]]] = []
+    open_calls: list[tuple[str, str, dict[str, object]]] = []
+    sentinel_mapper = object()
+
+    def fake_get_mapper(path: str, **kwargs: object) -> object:
+        mapper_calls.append((path, kwargs))
+        return sentinel_mapper
+
+    def fake_open(path: str, mode: str, **kwargs: object) -> object:
+        open_calls.append((path, mode, kwargs))
+        raise AssertionError("fsspec.open must not be called for .zarr URIs")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "fsspec",
+        SimpleNamespace(open=fake_open, get_mapper=fake_get_mapper),
+    )
+
+    resolved = _resolve_uri("s3://bucket/store.zarr", storage_options={"anon": True})
+
+    assert resolved is sentinel_mapper
+    assert mapper_calls == [("s3://bucket/store.zarr", {"anon": True})]
+    assert open_calls == []
+    # `_close_resolved_uri` must be a no-op for mappers (no `.close`).
+    _close_resolved_uri(resolved)

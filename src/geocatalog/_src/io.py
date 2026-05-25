@@ -45,11 +45,19 @@ def _resolve_uri(
     *,
     storage_options: dict[str, Any] | None = None,
 ) -> str | Path | Any:
-    """Resolve ``path`` to a local path or an fsspec binary file handle.
+    """Resolve ``path`` to a local path, fsspec mapper, or binary file handle.
 
-    Local paths pass through unchanged as ``str`` / ``Path`` values. Recognised
-    cloud/HTTP URIs return an fsspec file-like object; callers should pass the
-    returned value to `_close_resolved_uri` when finished.
+    Dispatch:
+
+    * Local paths (``str`` / ``Path``) pass through unchanged.
+    * Recognised cloud/HTTP URIs ending in ``.zarr`` return an
+      ``fsspec.get_mapper(...)`` — Zarr stores are directory-/mapping-based
+      and can't be represented by a single binary file handle. The mapper
+      is safe to drop on the floor (no resource to close) so
+      `_close_resolved_uri` treats it as a no-op.
+    * Other recognised cloud/HTTP URIs return an fsspec file-like object;
+      callers should pass the returned value to `_close_resolved_uri` when
+      finished.
     """
     if not _is_fsspec_uri(path):
         return path
@@ -61,7 +69,10 @@ def _resolve_uri(
             f"Reading {scheme!r} URIs requires the [fsspec] extra; install via "
             "`pip install 'geocatalog[fsspec]'`."
         ) from exc
-    return fsspec.open(str(path), mode="rb", **(storage_options or {})).open()
+    uri = str(path)
+    if urlsplit(uri).path.endswith(".zarr"):
+        return fsspec.get_mapper(uri, **(storage_options or {}))
+    return fsspec.open(uri, mode="rb", **(storage_options or {})).open()
 
 
 def _close_resolved_uri(resolved: Any) -> None:
