@@ -111,7 +111,10 @@ class TestAdapterStubs:
         with pytest.raises(NotImplementedError):
             list(src.query((-10, 35, 5, 45)))
 
-    def test_stac_requires_extra_or_not_implemented(self) -> None:
+    def test_stac_extra_constructs_factory(self) -> None:
+        # STACSource is implemented; behaviour is exercised in
+        # tests/test_stac_source.py. This skeleton test just locks the
+        # construction path + name attribute.
         try:
             from geocatalog._src.sources.stac import STACSource
 
@@ -119,8 +122,7 @@ class TestAdapterStubs:
         except ImportError:
             pytest.skip("`stac` extra not installed")
         assert src.name == "stac.pc"
-        with pytest.raises(NotImplementedError):
-            list(src.query((-10, 35, 5, 45)))
+        assert src.endpoint.startswith("https://")
 
     def test_gee_requires_extra_or_not_implemented(self) -> None:
         try:
