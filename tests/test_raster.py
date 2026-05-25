@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import time
+import threading
 
 import numpy as np
 import pandas as pd
@@ -136,11 +136,21 @@ class TestLoadRasterTimeseries:
             crs="EPSG:32629",
         )
         original_load_raster = raster_module.load_raster
+        # Deterministic out-of-order completion: both workers rendezvous at
+        # the barrier so they are concurrently in-flight, then the later day
+        # (2024-01-16) returns first while the earlier day (2024-01-15) only
+        # proceeds once the later one has signaled completion.
+        barrier = threading.Barrier(2)
+        later_done = threading.Event()
 
         def delay_first_day_load(catalog, slice_, **kwargs):
+            barrier.wait()
             if slice_.interval.left == pd.Timestamp("2024-01-15"):
-                time.sleep(0.05)
-            return original_load_raster(catalog, slice_, **kwargs)
+                later_done.wait()
+            result = original_load_raster(catalog, slice_, **kwargs)
+            if slice_.interval.left == pd.Timestamp("2024-01-16"):
+                later_done.set()
+            return result
 
         monkeypatch.setattr(raster_module, "load_raster", delay_first_day_load)
 

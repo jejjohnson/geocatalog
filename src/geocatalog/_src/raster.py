@@ -15,7 +15,7 @@ import dataclasses
 import functools
 import re
 from collections.abc import Sequence
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -453,11 +453,22 @@ def load_raster_timeseries(
                 results.append(result)
     else:
         with ThreadPoolExecutor(max_workers=n_workers) as executor:
+            # Submit in day order and consume results in the same order so
+            # that, with on_missing_day="raise", the earliest failing day
+            # raises deterministically regardless of completion order.
             futures = [executor.submit(load_day, day) for day in days]
-            for future in as_completed(futures):
-                result = future.result()
-                if result is not None:
-                    results.append(result)
+            try:
+                for future in futures:
+                    result = future.result()
+                    if result is not None:
+                        results.append(result)
+            except BaseException:
+                # Cancel any pending work before propagating so large
+                # intervals do not block on already-submitted tasks.
+                for pending in futures:
+                    pending.cancel()
+                executor.shutdown(wait=False, cancel_futures=True)
+                raise
 
     if not results:
         raise ValueError("load_raster_timeseries: no usable days in interval")
