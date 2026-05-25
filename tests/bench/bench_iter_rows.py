@@ -26,3 +26,18 @@ def test_iter_rows_all(benchmark, medium_catalog) -> None:
         return sum(1 for _ in medium_catalog.iter_rows())
 
     benchmark(_drain)
+
+
+def test_inmemory_100k(benchmark) -> None:
+    """Walk a 100k-row in-memory catalog.
+
+    Uses ``benchmark.pedantic`` with explicit ``rounds`` and ``iterations``
+    so the CI bench-regression job has predictable runtime — pytest-benchmark's
+    auto-calibration is variable and can blow up the baseline run at this size.
+    """
+    catalog = make_inmemory_catalog(100_000, seed=0)
+
+    def _drain() -> int:
+        return sum(1 for _ in catalog.iter_rows())
+
+    benchmark.pedantic(_drain, rounds=5, iterations=1)
