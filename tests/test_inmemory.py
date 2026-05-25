@@ -402,6 +402,40 @@ class TestIterSlices:
         np.testing.assert_allclose(slices[1].bounds, (200, 0, 300, 100))
 
 
+class TestIterRows:
+    def test_does_not_leak_bbox_or_schema_metadata_into_extras(self) -> None:
+        """Regression for the P2 bug where the GeoParquet 1.1 ``bbox``
+        covering struct and underscore-prefixed schema columns
+        (e.g. ``_internal``) leaked into ``CatalogRow.extras``, where
+        they'd flow into downstream consumers like STAC export.
+        Mirrors `DuckDBGeoCatalog.iter_rows`'s filter list.
+        """
+        cat = _build(
+            [
+                {
+                    "geometry": shapely.geometry.box(0, 0, 100, 100),
+                    "start_time": pd.Timestamp("2024-01-01"),
+                    "end_time": pd.Timestamp("2024-01-02"),
+                    "filepath": "tile.tif",
+                    # GeoParquet 1.1 bbox covering column.
+                    "bbox": {"xmin": 0, "ymin": 0, "xmax": 100, "ymax": 100},
+                    # Underscore-prefixed schema column.
+                    "_internal": "secret",
+                    # Real user column — must survive.
+                    "eo:cloud_cover": 7.5,
+                },
+            ]
+        )
+
+        rows = list(cat.iter_rows())
+        assert len(rows) == 1
+        extras = rows[0].extras
+        assert "bbox" not in extras
+        assert "_internal" not in extras
+        assert not any(k.startswith("_") for k in extras)
+        assert extras["eo:cloud_cover"] == 7.5
+
+
 class TestWhere:
     def test_filter_by_column(self, two_tile_catalog: InMemoryGeoCatalog) -> None:
         out = two_tile_catalog.where("filepath == 'tile_A.tif'")

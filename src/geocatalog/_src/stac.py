@@ -180,10 +180,14 @@ def to_stac_collection(
         _normalize_crs_property(props)
         start = _datetime_or_none(row.interval.left)
         end = _datetime_or_none(row.interval.right)
-        item_datetime = start if _same_instant(start, end) else None
+        # STAC / RFC3339 require tz-aware ISO 8601 with `Z` (or offset)
+        # for `start_datetime` / `end_datetime` and the item-level
+        # `datetime`. Naive timestamps from the catalog time-axis are
+        # treated as UTC.
+        item_datetime = _to_utc_datetime(start) if _same_instant(start, end) else None
         if item_datetime is None:
-            props["start_datetime"] = start.isoformat() if start is not None else None
-            props["end_datetime"] = end.isoformat() if end is not None else None
+            props["start_datetime"] = _to_rfc3339(start)
+            props["end_datetime"] = _to_rfc3339(end)
 
         item = pystac.Item(
             id=str(row.extras.get("stac_item_id", f"{collection_id}-{idx}")),
@@ -263,17 +267,22 @@ def _geometry_from_item(item: pystac.Item) -> shapely.geometry.base.BaseGeometry
 
 
 def _item_interval(item: pystac.Item) -> tuple[pd.Timestamp, pd.Timestamp]:
-    if item.datetime is not None:
-        timestamp = _timestamp(item.datetime)
-        return timestamp, timestamp
+    # Per STAC 1.0, when an item carries both a nominal `datetime` and a
+    # `start_datetime`/`end_datetime` range, the range describes the
+    # actual acquisition window and `datetime` is a representative
+    # instant inside it. Preferring the range avoids collapsing real
+    # time-extent metadata into a zero-width interval.
     props = item.properties
     start = props.get("start_datetime")
     end = props.get("end_datetime")
-    if start is None or end is None:
-        raise ValueError(
-            f"STAC item {item.id!r} needs datetime or start_datetime/end_datetime"
-        )
-    return _timestamp(start), _timestamp(end)
+    if start is not None and end is not None:
+        return _timestamp(start), _timestamp(end)
+    if item.datetime is not None:
+        timestamp = _timestamp(item.datetime)
+        return timestamp, timestamp
+    raise ValueError(
+        f"STAC item {item.id!r} needs datetime or start_datetime/end_datetime"
+    )
 
 
 def _timestamp(value: Any) -> pd.Timestamp:
@@ -333,6 +342,31 @@ def _datetime_or_none(value: Any) -> Any | None:
     if pd.isna(value):
         return None
     return pd.Timestamp(value).to_pydatetime()
+
+
+def _to_utc_datetime(value: Any | None) -> Any | None:
+    """Coerce a Python datetime to tz-aware UTC; naive inputs assumed UTC.
+
+    The catalog's stored time-axis contract is UTC, so a naive
+    timestamp is treated as already being in UTC rather than rejected.
+    pystac requires tz-aware datetimes for RFC3339-canonical output.
+    """
+    if value is None:
+        return None
+    ts = pd.Timestamp(value)
+    ts = ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
+    return ts.to_pydatetime()
+
+
+def _to_rfc3339(value: Any | None) -> str | None:
+    """Serialize a datetime as STAC-canonical RFC3339 (UTC, ``Z`` suffix)."""
+    if value is None:
+        return None
+    ts = pd.Timestamp(value)
+    ts = ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
+    # `.isoformat()` on a UTC-aware Timestamp yields ``...+00:00``;
+    # STAC canonical form uses ``Z``.
+    return ts.isoformat().replace("+00:00", "Z")
 
 
 def _same_instant(left: Any | None, right: Any | None) -> bool:
