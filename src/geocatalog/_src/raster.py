@@ -383,10 +383,11 @@ def load_raster_timeseries(
 
     For each distinct day with matching rows in ``slice_.interval``,
     runs `load_raster` for that day's sub-slice and stacks the results
-    along a new leading time axis. Days without coverage are silently
-    dropped — the time axis is the *observed* day count, not a dense
-    calendar. The transform / CRS come from the last successful day's
-    load (same for every day since the slice is fixed).
+    along a new leading time axis sorted in chronological order. By
+    default, days whose per-day load raises `ValueError` are dropped —
+    the time axis is the *observed* day count, not a dense calendar.
+    The transform / CRS come from the chronologically last successful
+    day's load (same for every day since the slice is fixed).
 
     Args:
         catalog: A raster-backend catalog with at least one row in
