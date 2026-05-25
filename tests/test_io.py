@@ -8,13 +8,46 @@ from types import SimpleNamespace
 
 import pytest
 
-from geocatalog._src.io import _close_resolved_uri, _resolve_uri, _uri_name
+from geocatalog._src.io import (
+    _close_resolved_uri,
+    _is_fsspec_uri,
+    _resolve_uri,
+    _uri_name,
+)
 
 
 def test_resolve_uri_local_path_passthrough(tmp_path: Path) -> None:
     path = tmp_path / "tile.tif"
 
     assert _resolve_uri(path) == path
+
+
+def test_resolve_uri_windows_drive_letter_passthrough() -> None:
+    # `urlparse("C:/data/tile.tif").scheme == "c"`, so a naive scheme
+    # check would mis-route Windows local paths through fsspec. The
+    # `_FSSPEC_SCHEMES` allowlist must NOT include single-letter
+    # schemes — verify the path passes through untouched.
+    windows_path = "C:/data/tile.tif"
+
+    assert not _is_fsspec_uri(windows_path)
+    assert _resolve_uri(windows_path) == windows_path
+
+
+@pytest.mark.parametrize(
+    "uri",
+    [
+        "s3://bucket/key.tif",
+        "gs://bucket/key.tif",
+        "gcs://bucket/key.tif",
+        "az://container/key.tif",
+        "azure://container/key.tif",
+        "http://example.com/key.tif",
+        "https://example.com/key.tif",
+        "hf://datasets/org/repo/key.tif",
+    ],
+)
+def test_is_fsspec_uri_recognises_supported_schemes(uri: str) -> None:
+    assert _is_fsspec_uri(uri)
 
 
 def test_resolve_uri_requires_fsspec_extra(monkeypatch: pytest.MonkeyPatch) -> None:
