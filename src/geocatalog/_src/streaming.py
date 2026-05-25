@@ -915,7 +915,22 @@ def _partition_value(row: dict[str, Any], name: str) -> Any:
     if name in row and row[name] is not None:
         return row[name]
     if name in {"year", "month", "day"}:
+        if "start_time" not in row or row["start_time"] is None:
+            raise ValueError(
+                f"partition column {name!r} requires a 'start_time' field on "
+                "every row (derived via pd.Timestamp). Set start_time in the "
+                "extractor, or remove year/month/day from partition_by."
+            )
         ts = pd.Timestamp(row["start_time"])
+        if pd.isna(ts):
+            # Silently producing "year=nan/month=nan/" shards corrupts the
+            # archive layout — downstream readers can't tell those rows
+            # apart from a string-valued "nan" partition.
+            raise ValueError(
+                f"partition column {name!r} cannot be derived from a NaT "
+                "start_time. Filter out time-less rows upstream or supply "
+                "explicit partition values on those rows."
+            )
         return getattr(ts, name)
     raise KeyError(f"partition column {name!r} not present in row")
 

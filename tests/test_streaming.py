@@ -442,6 +442,25 @@ class TestPartitionedArchives:
         assert len(february) == 1
         assert Path(next(february.iter_rows()).filepath).name == "2024-02-01-c.tif"
 
+    def test_partition_value_rejects_nat_start_time(self) -> None:
+        """NaT start_time must raise, not silently produce year=nan shards."""
+        from geocatalog._src.streaming import _partition_value
+
+        row = {
+            "start_time": pd.NaT,
+            "geometry": shapely.geometry.box(0, 0, 1, 1),
+        }
+        with pytest.raises(ValueError, match="NaT start_time"):
+            _partition_value(row, "year")
+
+    def test_partition_value_rejects_missing_start_time(self) -> None:
+        """year/month/day with no start_time field must raise a clear error."""
+        from geocatalog._src.streaming import _partition_value
+
+        row = {"geometry": shapely.geometry.box(0, 0, 1, 1)}
+        with pytest.raises(ValueError, match="requires a 'start_time' field"):
+            _partition_value(row, "month")
+
 
 # ---------------------------------------------------------------------------
 # EPSG:4326 default + cross-CRS smoke test

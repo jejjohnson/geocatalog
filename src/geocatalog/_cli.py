@@ -520,6 +520,19 @@ def convert(
     cat = _open_catalog(source)
     materialized = cat.materialize() if hasattr(cat, "materialize") else cat
     destination = out if out is not None else source.with_suffix("")
+    # `to_geoparquet(..., partition_by=...)` is destructive — it wipes
+    # `destination` before writing. When the source has no extension
+    # (already a partitioned dir) the default `source.with_suffix("")`
+    # resolves to the source itself, which would read-then-delete the
+    # input. Require an explicit `--out` for that case rather than
+    # silently destroying the user's archive.
+    if destination.resolve() == source.resolve():
+        print(
+            f"convert: refusing to overwrite source in place; pass --out to "
+            f"specify a destination different from {source}",
+            file=sys.stderr,
+        )
+        return 1
     try:
         to_geoparquet(materialized, destination, partition_by=partitions)
     except OSError as exc:
