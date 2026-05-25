@@ -65,11 +65,41 @@ xarray-raster = ["rioxarray>=0.15", "xarray>=2024.1"]
 duckdb = ["duckdb>=1.1"]
 # Streaming writer for incremental GeoParquet builds.
 streaming = ["zarr>=3.0"]
+# External data-source adapters. Each gated independently so a user
+# who only needs STAC doesn't get earthaccess. See
+# `docs/design/query-matchup.md` §4.2 for the full design.
+earthaccess = ["earthaccess>=0.10"]
+stac = ["pystac-client>=0.7", "planetary-computer>=1.0"]
+gee = ["earthengine-api>=0.1.380"]
+# `field_for()` bridge — lets `geocatalog.stage()` output flow straight
+# into a `geopatcher.SpatialPatcher` without manual `RasterField`
+# construction. See `docs/design/query-matchup.md` §8 (Phase 4).
+# Pinned to a specific commit so installs are reproducible while
+# geopatcher is pre-PyPI. Bump intentionally when picking up new
+# features. Once geopatcher publishes, swap to `geopatcher>=X.Y`.
+patch = [
+    "geopatcher @ git+https://github.com/jejjohnson/geopatcher.git@1b5a8b73acce0b4860d5030bc589253eb2b79dc1",
+]
+sources-all = [
+    "earthaccess>=0.10",
+    "pystac-client>=0.7",
+    "planetary-computer>=1.0",
+    "earthengine-api>=0.1.380",
+]
 full = [
     "xarray>=2024.1",
     "rioxarray>=0.15",
     "zarr>=3.0",
     "duckdb>=1.1",
+    # Source-adapter extras roll into `full` so `pip install 'geocatalog[full]'`
+    # is the one-shot install path that lights up every public surface.
+    "earthaccess>=0.10",
+    "pystac-client>=0.7",
+    "planetary-computer>=1.0",
+    "earthengine-api>=0.1.380",
+    # geopatcher bridge — exposes `geocatalog.staging.field_for`. Pinned
+    # via direct URL until the first PyPI release; see `[patch]` extra.
+    "geopatcher @ git+https://github.com/jejjohnson/geopatcher.git@1b5a8b73acce0b4860d5030bc589253eb2b79dc1",
 ]
 
 [project.urls]
@@ -118,9 +148,22 @@ docs = [
     "pygments>=2.19,<2.20",
 ]
 
+[tool.uv.sources]
+# `uv sync --extra patch` honours this stanza directly. `pip install`
+# users follow the PEP 508 git URL pinned in `[project.optional-dependencies]
+# patch`, so both tooling paths resolve to the same source until the
+# first PyPI release lands. Pinned to the same revision for parity.
+geopatcher = { git = "https://github.com/jejjohnson/geopatcher", rev = "1b5a8b73acce0b4860d5030bc589253eb2b79dc1" }
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+# Required so the `[patch]` extra can pin geopatcher via a PEP 508
+# direct URL (`geopatcher @ git+https://...`) until the first PyPI
+# release lands. Drop this when geopatcher publishes.
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/geocatalog"]
@@ -179,7 +222,14 @@ python_files = ["test_*.py", "bench_*.py"]
 # skip it (otherwise every CI run would pay the warmup + repeated-call
 # cost). Invoke explicitly with
 # ``uv run pytest tests/bench --benchmark-only``.
-addopts = "--cov=src/geocatalog --cov-report=term-missing --cov-report=xml:coverage.xml --ignore=tests/bench"
+addopts = "--cov=src/geocatalog --cov-report=term-missing --cov-report=xml:coverage.xml --ignore=tests/bench -m 'not live'"
+markers = [
+    # Tests that hit real external services (Planetary Computer, NASA
+    # CMR, etc.). Skipped by default — `addopts` filters them out — so
+    # CI is deterministic and offline-friendly. Run on demand with
+    # ``uv run pytest -m live --no-cov``.
+    "live: requires network access to a real upstream API",
+]
 
 [tool.coverage.run]
 source = ["src/geocatalog"]

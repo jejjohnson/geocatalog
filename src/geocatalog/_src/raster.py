@@ -123,6 +123,7 @@ def build_raster_catalog(
     sort_by: tuple[str, ...] | None = ("start_time", "geometry_hilbert"),
     batch_size: int = 10_000,
     n_workers: int = 1,
+    ordered: bool = False,
 ) -> InMemoryGeoCatalog | DuckDBGeoCatalog:
     """Build a raster catalog — in-memory (default) or streamed to GeoParquet.
 
@@ -186,6 +187,14 @@ def build_raster_catalog(
             ``1`` runs sequentially in-process. ``>1`` spawns a
             ``ProcessPoolExecutor`` (``spawn`` start method) feeding
             the single in-process writer.
+        ordered: With ``backend="duckdb"`` and ``n_workers>1``, preserve
+            input row order instead of completion order. Useful for
+            reproducible artifacts when ``sort_by=None``. A slow input
+            earlier in the queue stalls every subsequent yield and can
+            temporarily reduce parallelism (workers may sit idle waiting
+            on the next-in-line future). Prefer ``ordered=False`` for
+            skewed workloads and sort post-hoc if you need a stable byte
+            layout.
 
     Returns:
         ``InMemoryGeoCatalog`` for ``backend="memory"``, otherwise a
@@ -213,6 +222,7 @@ def build_raster_catalog(
             sort_by=sort_by,
             batch_size=batch_size,
             n_workers=n_workers,
+            ordered=ordered,
         )
 
     pattern = re.compile(filename_regex) if filename_regex is not None else None
@@ -245,6 +255,7 @@ def _build_raster_catalog_duckdb(
     sort_by: tuple[str, ...] | None,
     batch_size: int,
     n_workers: int,
+    ordered: bool,
 ) -> DuckDBGeoCatalog:
     """Streaming-write branch for `build_raster_catalog`.
 
@@ -277,6 +288,7 @@ def _build_raster_catalog_duckdb(
         sort_by=sort_by,
         batch_size=batch_size,
         n_workers=n_workers,
+        ordered=ordered,
     )
 
 
