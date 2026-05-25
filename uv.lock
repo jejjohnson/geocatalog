@@ -1003,6 +1003,7 @@ full = [
     { name = "earthengine-api" },
     { name = "geopatcher" },
     { name = "planetary-computer" },
+    { name = "pystac" },
     { name = "pystac-client" },
     { name = "rioxarray" },
     { name = "xarray" },
@@ -1018,10 +1019,12 @@ sources-all = [
     { name = "earthaccess" },
     { name = "earthengine-api" },
     { name = "planetary-computer" },
+    { name = "pystac" },
     { name = "pystac-client" },
 ]
 stac = [
     { name = "planetary-computer" },
+    { name = "pystac" },
     { name = "pystac-client" },
 ]
 streaming = [
@@ -1083,6 +1086,9 @@ requires-dist = [
     { name = "planetary-computer", marker = "extra == 'stac'", specifier = ">=1.0" },
     { name = "pyarrow", specifier = ">=14.0" },
     { name = "pyproj", specifier = ">=3.6" },
+    { name = "pystac", marker = "extra == 'full'", specifier = ">=1.10" },
+    { name = "pystac", marker = "extra == 'sources-all'", specifier = ">=1.10" },
+    { name = "pystac", marker = "extra == 'stac'", specifier = ">=1.10" },
     { name = "pystac-client", marker = "extra == 'full'", specifier = ">=0.7" },
     { name = "pystac-client", marker = "extra == 'sources-all'", specifier = ">=0.7" },
     { name = "pystac-client", marker = "extra == 'stac'", specifier = ">=0.7" },
