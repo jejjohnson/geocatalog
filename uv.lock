@@ -1071,8 +1071,8 @@ requires-dist = [
     { name = "earthengine-api", marker = "extra == 'gee'", specifier = ">=0.1.380" },
     { name = "earthengine-api", marker = "extra == 'sources-all'", specifier = ">=0.1.380" },
     { name = "geopandas", specifier = ">=0.14" },
-    { name = "geopatcher", marker = "extra == 'full'", git = "https://github.com/jejjohnson/geopatcher" },
-    { name = "geopatcher", marker = "extra == 'patch'", git = "https://github.com/jejjohnson/geopatcher" },
+    { name = "geopatcher", marker = "extra == 'full'", git = "https://github.com/jejjohnson/geopatcher?rev=1b5a8b73acce0b4860d5030bc589253eb2b79dc1" },
+    { name = "geopatcher", marker = "extra == 'patch'", git = "https://github.com/jejjohnson/geopatcher?rev=1b5a8b73acce0b4860d5030bc589253eb2b79dc1" },
     { name = "georeader-spaceml", specifier = ">=2.1" },
     { name = "loguru", specifier = ">=0.7" },
     { name = "numpy", specifier = ">=1.26" },
@@ -1141,7 +1141,7 @@ wheels = [
 [[package]]
 name = "geopatcher"
 version = "0.0.2"
-source = { git = "https://github.com/jejjohnson/geopatcher#3cbee6b349454fc1ccc12d1d09defc7295f2257f" }
+source = { git = "https://github.com/jejjohnson/geopatcher?rev=1b5a8b73acce0b4860d5030bc589253eb2b79dc1#1b5a8b73acce0b4860d5030bc589253eb2b79dc1" }
 dependencies = [
     { name = "georeader-spaceml" },
     { name = "numpy" },

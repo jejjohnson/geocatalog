@@ -187,6 +187,21 @@ class TestFieldForErrors:
         with pytest.raises(ValueError, match="backend='vector'"):
             field_for(vector_cat)
 
+    def test_windows_drive_path_treated_as_local(self) -> None:
+        # `urlparse("C:/data/tile.tif").scheme` returns "c" on every
+        # platform — without the drive-letter special-case, the
+        # local-path classifier would reject valid Windows paths.
+        from geocatalog._src.staging._field_for import _is_local_path
+
+        assert _is_local_path("C:/data/tile.tif") is True
+        assert _is_local_path("c:/data/tile.tif") is True
+        assert _is_local_path("D:/some/long/path.tif") is True
+        # Real remote schemes are still rejected.
+        assert _is_local_path("https://example.com/tile.tif") is False
+        assert _is_local_path("s3://bucket/tile.tif") is False
+        assert _is_local_path("file:///tmp/tile.tif") is True
+        assert _is_local_path("/tmp/tile.tif") is True
+
     def test_non_local_uri_in_asset_map_raises_keyerror(
         self, tmp_path: Path, utm29_tile_factory
     ) -> None:

@@ -47,6 +47,21 @@ _GEOPATCHER_HINT = (
 _LOCAL_URI_SCHEMES = frozenset({"", "file"})
 
 
+def _is_local_path(path: str) -> bool:
+    """True if ``path`` is a local filesystem path, not a remote URI.
+
+    `urlparse("C:/data/tile.tif").scheme` returns ``'c'`` on every
+    platform, so a naive scheme-membership check would reject valid
+    Windows local paths. Real URI schemes are always 2+ characters
+    (``http``, ``s3``, ``gs``, …), so a single-character scheme is
+    treated as a drive letter rather than a remote scheme.
+    """
+    scheme = urlparse(path).scheme
+    if scheme in _LOCAL_URI_SCHEMES:
+        return True
+    return len(scheme) == 1 and scheme.isalpha()
+
+
 def field_for(
     catalog: GeoCatalog,
     asset: str | None = None,
@@ -128,8 +143,7 @@ def _reject_unstaged_uris(paths: list[str], *, asset: str | None) -> None:
     """
     bad: list[tuple[int, str]] = []
     for row_idx, p in enumerate(paths):
-        scheme = urlparse(p).scheme
-        if scheme not in _LOCAL_URI_SCHEMES:
+        if not _is_local_path(p):
             bad.append((row_idx, p))
     if not bad:
         return
