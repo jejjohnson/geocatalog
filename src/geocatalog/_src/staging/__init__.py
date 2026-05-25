@@ -25,9 +25,11 @@ Planned modules (Phase 5, see ``docs/design/query-matchup.md`` §4.7):
 from __future__ import annotations
 
 from geocatalog._src.staging._base import LocalCache, stage
+from geocatalog._src.staging._field_for import field_for
 
 
 __all__ = [
     "LocalCache",
+    "field_for",
     "stage",
 ]

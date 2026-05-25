@@ -71,6 +71,10 @@ streaming = ["zarr>=3.0"]
 earthaccess = ["earthaccess>=0.10"]
 stac = ["pystac-client>=0.7", "planetary-computer>=1.0"]
 gee = ["earthengine-api>=0.1.380"]
+# `field_for()` bridge — lets `geocatalog.stage()` output flow straight
+# into a `geopatcher.SpatialPatcher` without manual `RasterField`
+# construction. See `docs/design/query-matchup.md` §8 (Phase 4).
+patch = ["geopatcher>=0.0.2"]
 sources-all = [
     "earthaccess>=0.10",
     "pystac-client>=0.7",
@@ -88,6 +92,8 @@ full = [
     "pystac-client>=0.7",
     "planetary-computer>=1.0",
     "earthengine-api>=0.1.380",
+    # geopatcher bridge — exposes `geocatalog.staging.field_for`.
+    "geopatcher>=0.0.2",
 ]
 
 [project.urls]
@@ -135,6 +141,14 @@ docs = [
     # through as None. Pin until a fixed pymdown-extensions release ships (#38).
     "pygments>=2.19,<2.20",
 ]
+
+[tool.uv.sources]
+# Dev-time source for the `[patch]` extra: pull `geopatcher` from
+# GitHub until the first PyPI release lands. This stanza affects
+# `uv lock` / `uv sync` only — published wheel metadata still
+# carries the PyPI-flavoured `geopatcher` requirement from
+# `[project.optional-dependencies] patch = ["geopatcher>=0.0.2"]`.
+geopatcher = { git = "https://github.com/jejjohnson/geopatcher" }
 
 [build-system]
 requires = ["hatchling"]

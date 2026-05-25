@@ -8,10 +8,11 @@ See ``docs/design/query-matchup.md`` §4.7.
 
 from __future__ import annotations
 
-from geocatalog._src.staging import LocalCache, stage
+from geocatalog._src.staging import LocalCache, field_for, stage
 
 
 __all__ = [
     "LocalCache",
+    "field_for",
     "stage",
 ]
