@@ -25,8 +25,9 @@ import warnings
 from collections.abc import Iterator
 from functools import cached_property
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 from urllib.parse import urlsplit
+from weakref import WeakKeyDictionary
 
 import geopandas as gpd
 import numpy as np
@@ -55,6 +56,9 @@ except ImportError:  # pragma: no cover - exercised via the [duckdb] extra
 
 
 _BACKEND_T = Literal["raster", "xarray", "vector"]
+_BACKEND_TAG_CACHE: WeakKeyDictionary[
+    duckdb_mod.DuckDBPyConnection, dict[str, _BACKEND_T]
+] = WeakKeyDictionary()
 
 
 def _require_duckdb() -> Any:
@@ -538,7 +542,7 @@ class DuckDBGeoCatalog:
 
     # ── properties + persistence ─────────────────────────────────────────
 
-    @property
+    @cached_property
     def total_bounds(self) -> tuple[float, float, float, float]:
         """Union bbox over the relation — one SQL aggregate, not a scan.
 
@@ -546,14 +550,14 @@ class DuckDBGeoCatalog:
             ``(xmin, ymin, xmax, ymax)`` in catalog-CRS units. Four
             NaNs for an empty catalog.
         """
-        if len(self) == 0:
-            return (np.nan, np.nan, np.nan, np.nan)
         df = self.relation.aggregate(
             "MIN(ST_XMin(geometry)) AS xmin, "
             "MIN(ST_YMin(geometry)) AS ymin, "
             "MAX(ST_XMax(geometry)) AS xmax, "
             "MAX(ST_YMax(geometry)) AS ymax"
         ).df()
+        if pd.isna(df["xmin"].iloc[0]):
+            return (np.nan, np.nan, np.nan, np.nan)
         return (
             float(df["xmin"].iloc[0]),
             float(df["ymin"].iloc[0]),
@@ -561,7 +565,7 @@ class DuckDBGeoCatalog:
             float(df["ymax"].iloc[0]),
         )
 
-    @property
+    @cached_property
     def temporal_extent(self) -> pd.Interval:
         """Tightest interval over the relation — one SQL aggregate.
 
@@ -569,11 +573,11 @@ class DuckDBGeoCatalog:
             ``pd.Interval(min(start_time), max(end_time), closed='both')``.
             Both endpoints are ``pd.NaT`` for an empty catalog.
         """
-        if len(self) == 0:
-            return pd.Interval(pd.NaT, pd.NaT, closed="both")
         df = self.relation.aggregate(
             "MIN(start_time) AS tmin, MAX(end_time) AS tmax"
         ).df()
+        if pd.isna(df["tmin"].iloc[0]):
+            return pd.Interval(pd.NaT, pd.NaT, closed="both")
         return pd.Interval(
             pd.Timestamp(df["tmin"].iloc[0]),
             pd.Timestamp(df["tmax"].iloc[0]),
@@ -632,10 +636,15 @@ class DuckDBGeoCatalog:
             backend=self.backend,
         )
 
-    def __len__(self) -> int:
-        """Number of rows — runs one COUNT(*) query."""
+    @cached_property
+    def _row_count(self) -> int:
+        """Cached row count from one COUNT(*) query."""
         df = self.relation.aggregate("COUNT(*) AS n").df()
         return int(df["n"].iloc[0])
+
+    def __len__(self) -> int:
+        """Number of rows — cached after one COUNT(*) query."""
+        return self._row_count
 
     def __repr__(self) -> str:
         return (
@@ -825,6 +834,12 @@ def _read_backend_tag(
     don't break the lookup, and narrowed exception handling so genuine
     SQL parse errors aren't silently swallowed as a missing column.
     """
+    source_cache = _lookup_backend_cache(con)
+    if source_cache is not None:
+        cached = source_cache.get(source)
+        if cached is not None:
+            return cached
+
     dd = _require_duckdb()
     try:
         df = con.sql(
@@ -833,17 +848,53 @@ def _read_backend_tag(
         ).df()
     except dd.BinderException:
         # Missing `_backend` column — externally produced parquet.
+        _cache_backend_tag(con, source, default)
         return default
     except dd.IOException:
         # Unreadable parquet path; caller will hit a clearer error
         # on the next read.
+        _cache_backend_tag(con, source, default)
         return default
     if len(df) == 0 or pd.isna(df["_backend"].iloc[0]):
+        _cache_backend_tag(con, source, default)
         return default
     tag = str(df["_backend"].iloc[0])
     if tag in ("raster", "xarray", "vector"):
-        return tag  # type: ignore[return-value]
+        _cache_backend_tag(con, source, cast(_BACKEND_T, tag))
+        return cast(_BACKEND_T, tag)
+    _cache_backend_tag(con, source, default)
     return default
+
+
+def _lookup_backend_cache(
+    con: duckdb_mod.DuckDBPyConnection,
+) -> dict[str, _BACKEND_T] | None:
+    """`WeakKeyDictionary` lookup with a non-weakref-able-key fallback.
+
+    The repo dep is `duckdb>=1.1`, and `DuckDBPyConnection` only gained
+    weakref support in newer releases — on older DuckDBs both `.get(con)`
+    and `cache[con] = ...` raise `TypeError`. Treat that as a cache miss
+    so behaviour stays correct; only the per-source memoisation is lost.
+    """
+    try:
+        return _BACKEND_TAG_CACHE.get(con)
+    except TypeError:
+        return None
+
+
+def _cache_backend_tag(
+    con: duckdb_mod.DuckDBPyConnection, source: str, tag: _BACKEND_T
+) -> None:
+    source_cache = _lookup_backend_cache(con)
+    if source_cache is None:
+        source_cache = {}
+        # See `_lookup_backend_cache` — older DuckDB versions reject
+        # weakref keys; skip caching for those connections.
+        try:
+            _BACKEND_TAG_CACHE[con] = source_cache
+        except TypeError:
+            return
+    source_cache[source] = tag
 
 
 def _df_to_inmemory(

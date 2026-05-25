@@ -12,6 +12,7 @@ import shapely.geometry
 
 duckdb = pytest.importorskip("duckdb")
 
+import geocatalog._src.duckdb_backend as duckdb_backend
 from geocatalog import (
     DuckDBGeoCatalog,
     GeoSlice,
@@ -43,6 +44,75 @@ def _mem_two_tiles(crs: str = "EPSG:32629") -> InMemoryGeoCatalog:
         crs=crs,
     )
     return InMemoryGeoCatalog(gdf, backend="raster")
+
+
+class _AggregateResult:
+    def __init__(self, df: pd.DataFrame) -> None:
+        self._df = df
+
+    def df(self) -> pd.DataFrame:
+        return self._df
+
+
+class _CountingRelation:
+    def __init__(
+        self,
+        *,
+        n: int = 2,
+        bounds: tuple[float, float, float, float] = (0.0, 0.0, 300.0, 100.0),
+        temporal: tuple[pd.Timestamp, pd.Timestamp] = (
+            pd.Timestamp("2024-01-01"),
+            pd.Timestamp("2024-01-03"),
+        ),
+        child_relation: _CountingRelation | None = None,
+    ) -> None:
+        self.n = n
+        self.bounds = bounds
+        self.temporal = temporal
+        self.child_relation = child_relation
+        self.aggregate_calls: list[str] = []
+        self.filter_calls: list[str] = []
+
+    def aggregate(self, expression: str) -> _AggregateResult:
+        self.aggregate_calls.append(expression)
+        if "COUNT(*)" in expression:
+            return _AggregateResult(pd.DataFrame({"n": [self.n]}))
+        if "ST_XMin" in expression:
+            xmin, ymin, xmax, ymax = self.bounds
+            return _AggregateResult(
+                pd.DataFrame(
+                    {
+                        "xmin": [xmin],
+                        "ymin": [ymin],
+                        "xmax": [xmax],
+                        "ymax": [ymax],
+                    }
+                )
+            )
+        if "start_time" in expression:
+            tmin, tmax = self.temporal
+            return _AggregateResult(pd.DataFrame({"tmin": [tmin], "tmax": [tmax]}))
+        raise AssertionError(f"unexpected aggregate: {expression}")
+
+    def filter(self, where: str) -> _CountingRelation:
+        self.filter_calls.append(where)
+        if self.child_relation is None:
+            self.child_relation = _CountingRelation(
+                n=self.n,
+                bounds=self.bounds,
+                temporal=self.temporal,
+            )
+        return self.child_relation
+
+
+class _CountingConnection:
+    def __init__(self, backend: str = "vector") -> None:
+        self.backend = backend
+        self.calls = 0
+
+    def sql(self, _query: str, **_kwargs: object) -> _AggregateResult:
+        self.calls += 1
+        return _AggregateResult(pd.DataFrame({"_backend": [self.backend]}))
 
 
 @pytest.fixture
@@ -304,6 +374,131 @@ class TestProperties:
         assert cfg["engine"] == "duckdb"
         assert cfg["backend"] == "raster"
         assert cfg["len"] == 2
+
+
+class TestCaching:
+    def test_len_runs_one_query(self) -> None:
+        relation = _CountingRelation()
+        duck = DuckDBGeoCatalog(
+            relation, con=duckdb.connect(), crs="EPSG:32629", backend="raster"
+        )
+
+        for _ in range(10):
+            assert len(duck) == 2
+
+        assert len(relation.aggregate_calls) == 1
+        assert "COUNT(*)" in relation.aggregate_calls[0]
+
+    def test_total_bounds_runs_one_query(self) -> None:
+        relation = _CountingRelation()
+        duck = DuckDBGeoCatalog(
+            relation, con=duckdb.connect(), crs="EPSG:32629", backend="raster"
+        )
+
+        for _ in range(10):
+            assert duck.total_bounds == (0.0, 0.0, 300.0, 100.0)
+
+        assert len(relation.aggregate_calls) == 1
+        assert "ST_XMin" in relation.aggregate_calls[0]
+
+    def test_temporal_extent_runs_one_query(self) -> None:
+        relation = _CountingRelation()
+        duck = DuckDBGeoCatalog(
+            relation, con=duckdb.connect(), crs="EPSG:32629", backend="raster"
+        )
+
+        for _ in range(10):
+            ext = duck.temporal_extent
+            assert ext.left == pd.Timestamp("2024-01-01")
+            assert ext.right == pd.Timestamp("2024-01-03")
+
+        assert len(relation.aggregate_calls) == 1
+        assert "start_time" in relation.aggregate_calls[0]
+
+    def test_derived_catalog_gets_own_cache(self) -> None:
+        child_relation = _CountingRelation(bounds=(0.0, 0.0, 100.0, 100.0))
+        parent_relation = _CountingRelation(child_relation=child_relation)
+        duck = DuckDBGeoCatalog(
+            parent_relation,
+            con=duckdb.connect(),
+            crs="EPSG:32629",
+            backend="raster",
+        )
+
+        assert duck.total_bounds == (0.0, 0.0, 300.0, 100.0)
+        assert duck.total_bounds == (0.0, 0.0, 300.0, 100.0)
+        derived = duck.query(bounds=(0, 0, 50, 50), crs="EPSG:32629")
+        assert derived.total_bounds == (0.0, 0.0, 100.0, 100.0)
+        assert derived.total_bounds == (0.0, 0.0, 100.0, 100.0)
+
+        assert len(parent_relation.aggregate_calls) == 1
+        assert len(child_relation.aggregate_calls) == 1
+
+    def test_backend_tag_read_is_cached_per_connection_and_source(self) -> None:
+        con = _CountingConnection()
+        other_con = _CountingConnection("xarray")
+        duckdb_backend._BACKEND_TAG_CACHE.clear()
+
+        first = duckdb_backend._read_backend_tag(
+            con, "catalog.parquet", default="raster"
+        )
+        second = duckdb_backend._read_backend_tag(
+            con, "catalog.parquet", default="raster"
+        )
+        other_source = duckdb_backend._read_backend_tag(
+            con, "other.parquet", default="raster"
+        )
+        other_connection = duckdb_backend._read_backend_tag(
+            other_con, "catalog.parquet", default="raster"
+        )
+
+        assert first == "vector"
+        assert second == "vector"
+        assert other_source == "vector"
+        assert other_connection == "xarray"
+        assert con.calls == 2
+        assert other_con.calls == 1
+
+    def test_backend_tag_read_falls_back_when_connection_not_weakrefable(
+        self,
+    ) -> None:
+        """Older DuckDB releases (>=1.1, <1.5) ship a `DuckDBPyConnection`
+        without weakref support. Adding such a connection as a
+        `WeakKeyDictionary` key raises `TypeError`; the helper must
+        degrade to no-cache rather than propagate the error."""
+
+        class _NoWeakRefConnection:
+            __slots__ = ("backend", "calls")
+
+            def __init__(self) -> None:
+                self.backend = "vector"
+                self.calls = 0
+
+            def sql(self, _query: str, **_kwargs: object) -> _AggregateResult:
+                self.calls += 1
+                return _AggregateResult(pd.DataFrame({"_backend": [self.backend]}))
+
+        con = _NoWeakRefConnection()
+        duckdb_backend._BACKEND_TAG_CACHE.clear()
+
+        # Sanity: this connection genuinely can't be weakref'd.
+        import weakref
+
+        with pytest.raises(TypeError):
+            weakref.ref(con)
+
+        first = duckdb_backend._read_backend_tag(
+            con, "catalog.parquet", default="raster"
+        )
+        second = duckdb_backend._read_backend_tag(
+            con, "catalog.parquet", default="raster"
+        )
+
+        # Correct value on both calls…
+        assert first == "vector"
+        assert second == "vector"
+        # …but cache was skipped, so every call re-queried.
+        assert con.calls == 2
 
 
 class TestSqlEscape:
