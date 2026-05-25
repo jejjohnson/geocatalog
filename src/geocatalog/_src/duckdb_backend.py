@@ -148,9 +148,21 @@ class DuckDBGeoCatalog:
     Connection ownership is explicit: catalogs returned by `open` own
     their DuckDB connection and close it from `close` or context-manager
     exit. Catalogs derived from `query` / `intersect` / `union` share
-    their parent's connection and `close` is a no-op for them. Even a
-    no-filter `query` returns a non-owning wrapper so closing the result
-    cannot close the parent catalog.
+    their parent's connection and ``close()`` is a no-op for them. Even
+    a no-filter `query` returns a non-owning wrapper so calling ``close``
+    on the result cannot close the parent catalog.
+
+    Derived catalogs additionally hold a strong reference back to the
+    originating *owning* catalog via ``_owner``. This keeps the fluent
+    chain ``DuckDBGeoCatalog.open(path).query(...)`` safe: the
+    transitively-referenced owner stays alive (and its connection
+    open) as long as any derived catalog in the chain is reachable.
+    When a derived catalog is used as a context manager
+    (``with cat.query(...) as out:``), its ``__exit__`` closes the
+    owning catalog so the underlying connection is released on block
+    exit. Calling ``close()`` directly on a derived catalog remains a
+    no-op — only ``__exit__`` (or closing the owner directly) tears
+    down the shared connection.
 
     Args:
         relation: A DuckDB relation whose columns include ``filepath``,
@@ -191,6 +203,14 @@ class DuckDBGeoCatalog:
         self.crs = pyproj.CRS.from_user_input(crs)
         self.backend = backend
         self._owns_con = _owns_con
+        # Strong ref back to the *owning* catalog when this instance is a
+        # derivation (`query` / `intersect` / `union` / `sql`). Keeps the
+        # owner — and therefore the underlying DuckDB connection — alive
+        # for the lifetime of any derived catalog in the chain, so the
+        # fluent pattern `DuckDBGeoCatalog.open(p).query(...)` doesn't
+        # drop the only reference to the owner mid-expression and leak
+        # the connection in long-lived processes.
+        self._owner: DuckDBGeoCatalog | None = None
 
     def _require_open_con(self) -> duckdb_mod.DuckDBPyConnection:
         con = self.con
@@ -204,15 +224,31 @@ class DuckDBGeoCatalog:
         return con
 
     def _derive(self, relation: duckdb_mod.DuckDBPyRelation) -> DuckDBGeoCatalog:
-        return DuckDBGeoCatalog(
+        derived = DuckDBGeoCatalog(
             relation,
             con=self._require_open_con(),
             crs=self.crs,
             backend=self.backend,
         )
+        # Anchor the derivation chain at the originating owning catalog.
+        # If `self` owns its connection, `self` is the owner; otherwise
+        # `self` itself is a derivation and we inherit its owner. This
+        # gives every derived instance a direct strong ref to the root
+        # owner — `A.query().intersect()` keeps `A` reachable until the
+        # outermost derived catalog is dropped.
+        derived._owner = self if self._owns_con else self._owner
+        return derived
 
     def close(self) -> None:
-        """Close this catalog's DuckDB connection if it owns it."""
+        """Close this catalog's DuckDB connection if it owns it.
+
+        No-op for derived catalogs (from `query` / `intersect` / `union`
+        / `sql`) — they share the owner's connection and closing them
+        would invalidate sibling derivations. Use the *owning* catalog's
+        ``close``, or a context manager on the owning instance, to tear
+        down the connection. A derived catalog used as a context
+        manager closes its owner on ``__exit__``.
+        """
         if self._owns_con and self.con is not None:
             self.con.close()
             self.con = None
@@ -221,8 +257,23 @@ class DuckDBGeoCatalog:
         self._require_open_con()
         return self
 
-    def __exit__(self, *exc: Any) -> None:
-        self.close()
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: Any,
+    ) -> None:
+        # On exit, close the owner if we have one — that's the fluent
+        # `with DuckDBGeoCatalog.open(p).query(...) as cat:` pattern,
+        # where the only handle the caller has is `cat` (a derivation),
+        # and the underlying connection would otherwise leak. For an
+        # owning catalog `_owner is None`, so we fall back to closing
+        # ourselves. Direct `close()` calls on a derivation remain a
+        # no-op so sibling derivations on the same owner stay valid.
+        if self._owner is not None:
+            self._owner.close()
+        else:
+            self.close()
 
     # ── factories ────────────────────────────────────────────────────────
 

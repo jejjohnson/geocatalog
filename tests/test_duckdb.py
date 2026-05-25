@@ -28,7 +28,12 @@ CLOSED_CONNECTION_MESSAGE = (
     "Open a new catalog, or keep the parent catalog open when using derived catalogs."
 )
 CLOSED_CONNECTION_MATCH = re.escape(CLOSED_CONNECTION_MESSAGE)
-DUCKDB_CLOSED_CONNECTION_MATCH = "Connection has already been closed"
+# Substring rather than DuckDB's full error phrase — message wording has
+# shifted across releases (e.g. "Connection has already been closed",
+# "Connection already closed!", "Connection Error: ... already been
+# closed"), so anchor on the stable "already" + "closed" fragment to
+# keep the test version-tolerant.
+DUCKDB_CLOSED_CONNECTION_MATCH = r"[Aa]lready.*closed"
 
 
 def _mem_two_tiles(crs: str = "EPSG:32629") -> InMemoryGeoCatalog:
@@ -263,6 +268,168 @@ class TestLifecycle:
             assert dd.execute("SELECT 1").fetchone() == (1,)
         finally:
             dd.close()
+
+    def test_open_closes_connection_when_setup_raises(
+        self, parquet_two_tiles: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression: if `_ensure_spatial` (or any other setup step in
+        `open()`) raises, the freshly opened connection must be closed
+        before the exception propagates — otherwise long-lived processes
+        leak a DuckDB handle per failed open.
+        """
+        from geocatalog._src import duckdb_backend as backend
+
+        opened: list[duckdb.DuckDBPyConnection] = []
+        real_connect = backend.duckdb.connect
+
+        def recording_connect(*args: object, **kwargs: object):
+            con = real_connect(*args, **kwargs)
+            opened.append(con)
+            return con
+
+        def boom(_con: duckdb.DuckDBPyConnection) -> None:
+            raise RuntimeError("simulated extension load failure")
+
+        monkeypatch.setattr(backend.duckdb, "connect", recording_connect)
+        monkeypatch.setattr(backend, "_ensure_spatial", boom)
+
+        with pytest.raises(RuntimeError, match="simulated extension load failure"):
+            DuckDBGeoCatalog.open(parquet_two_tiles)
+
+        assert len(opened) == 1
+        # SELECT 1 on the recorded connection should fail because it was
+        # closed during failure-path cleanup.
+        with pytest.raises(
+            duckdb.ConnectionException,
+            match=DUCKDB_CLOSED_CONNECTION_MATCH,
+        ):
+            opened[0].execute("SELECT 1")
+
+    def test_from_memory_closes_owned_connection_when_setup_raises(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Mirror of the `open()` failure-path test for `from_memory()`
+        when it allocates a fresh connection: a failure inside
+        `_ensure_spatial` must close that connection before re-raising.
+        Externally-supplied connections stay untouched (covered by
+        `test_from_memory_does_not_own_external_connection`).
+        """
+        from geocatalog._src import duckdb_backend as backend
+
+        opened: list[duckdb.DuckDBPyConnection] = []
+        real_connect = backend.duckdb.connect
+
+        def recording_connect(*args: object, **kwargs: object):
+            con = real_connect(*args, **kwargs)
+            opened.append(con)
+            return con
+
+        def boom(_con: duckdb.DuckDBPyConnection) -> None:
+            raise RuntimeError("simulated extension load failure")
+
+        monkeypatch.setattr(backend.duckdb, "connect", recording_connect)
+        monkeypatch.setattr(backend, "_ensure_spatial", boom)
+
+        mem = _mem_two_tiles()
+        with pytest.raises(RuntimeError, match="simulated extension load failure"):
+            DuckDBGeoCatalog.from_memory(mem)
+
+        assert len(opened) == 1
+        with pytest.raises(
+            duckdb.ConnectionException,
+            match=DUCKDB_CLOSED_CONNECTION_MATCH,
+        ):
+            opened[0].execute("SELECT 1")
+
+    def test_fluent_chain_records_owner_via_from_memory(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Regression for the codex P1 fluent-chain leak: a derived
+        catalog from `DuckDBGeoCatalog.from_memory(mem).query(...)` must
+        hold a strong ref back to the originating owning catalog via
+        `_owner`, and using the derivation as a context manager must
+        close that owner on `__exit__`. Without this, the only
+        reference to the owning catalog is dropped mid-expression and
+        the underlying DuckDB connection leaks for the lifetime of the
+        process.
+
+        We bypass `_ensure_spatial` because no spatial operations run
+        in this test — the chain uses a `ST_Intersects` predicate
+        through `query()` but the AOI filter is the only spatial bit
+        and the test only inspects row count, geometry decode, and
+        connection state. Keeping the test independent of the
+        network-fetched `spatial` extension also keeps it green in
+        sandboxed CI.
+        """
+        from geocatalog._src import duckdb_backend as backend
+
+        monkeypatch.setattr(backend, "_ensure_spatial", lambda _con: None)
+
+        mem = _mem_two_tiles()
+        # `.query()` without bounds returns a no-filter derivation —
+        # avoids needing `ST_Intersects` (which lives in the spatial
+        # extension we just stubbed out).
+        with DuckDBGeoCatalog.from_memory(mem).query() as cat:
+            assert len(cat) == 2
+            owner = cat._owner
+            assert owner is not None
+            assert owner._owns_con is True
+            assert owner.con is not None
+
+        # After exit the owner must be closed and the shared connection
+        # torn down — `cat` points at the same connection so native
+        # DuckDB operations on it now fail.
+        assert owner.con is None
+        with pytest.raises(
+            duckdb.ConnectionException,
+            match=DUCKDB_CLOSED_CONNECTION_MATCH,
+        ):
+            len(cat)
+
+    def test_fluent_chain_of_derivations_holds_owner_alive(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Chained derivations (`A.query().sql(...)`) must transitively
+        anchor the owner: every derived catalog along the chain points
+        at the same root owner so a multi-step fluent expression doesn't
+        leak the connection either.
+        """
+        from geocatalog._src import duckdb_backend as backend
+
+        monkeypatch.setattr(backend, "_ensure_spatial", lambda _con: None)
+
+        mem = _mem_two_tiles()
+        with DuckDBGeoCatalog.from_memory(mem).query().sql("filepath = 'A.tif'") as cat:
+            # Inner derivation inherits the same root owner as the
+            # intermediate one.
+            assert cat._owner is not None
+            assert cat._owner._owns_con is True
+            assert len(cat) == 1
+            owner = cat._owner
+
+        assert owner.con is None
+
+    def test_derived_close_remains_no_op(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A bare `derived.close()` (without context manager) must stay
+        a no-op so sibling derivations on the same owner keep working —
+        this guards against accidentally repurposing `close()` as the
+        chain-tear-down hook now that `__exit__` does that job.
+        """
+        from geocatalog._src import duckdb_backend as backend
+
+        monkeypatch.setattr(backend, "_ensure_spatial", lambda _con: None)
+
+        mem = _mem_two_tiles()
+        owner = DuckDBGeoCatalog.from_memory(mem)
+        try:
+            derived = owner.query()
+            assert derived._owner is owner
+            derived.close()  # no-op
+            assert owner.con is not None
+            assert len(owner) == 2
+            assert len(derived) == 2
+        finally:
+            owner.close()
 
 
 class TestQuery:
