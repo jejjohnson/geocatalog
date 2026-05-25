@@ -104,6 +104,25 @@ def test_from_stac_items_can_expand_all_assets() -> None:
     }
 
 
+def test_from_stac_items_empty_returns_empty_catalog() -> None:
+    cat = gc.from_stac_items([], asset_key="B04")
+
+    assert len(cat) == 0
+    assert cat.backend == "raster"
+    assert cat.gdf.crs == "EPSG:4326"
+
+
+def test_from_stac_items_prefers_per_asset_proj_epsg() -> None:
+    item = _item("s2-asset-crs", href="s3://bucket/B04.tif")
+    # STAC projection extension: per-asset proj fields override item-level.
+    item.assets["B04"].extra_fields["proj:epsg"] = 32630
+
+    cat = gc.from_stac_items([item], asset_key="B04")
+
+    row = next(cat.iter_rows())
+    assert row.extras["crs"] == "EPSG:32630"
+
+
 def test_to_stac_collection_round_trips_with_pystac(tmp_path: Path) -> None:
     gdf = gpd.GeoDataFrame(
         {

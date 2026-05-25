@@ -70,10 +70,26 @@ def from_stac_items(
             )
         )
     if not rows:
-        raise ValueError("from_stac_items: no STAC assets yielded catalog rows")
-
-    gdf = gpd.GeoDataFrame(rows, geometry="geometry", crs=catalog_crs)
-    catalog = InMemoryGeoCatalog(gdf, backend="raster")
+        # Empty STAC searches are common (overly tight bbox, future
+        # date window, collection mismatch); return a typed empty
+        # catalog rather than raising so callers can branch on `len`.
+        empty_gdf = gpd.GeoDataFrame(
+            {
+                "filepath": [],
+                "geometry": [],
+                "start_time": pd.Series([], dtype="datetime64[ns]"),
+                "end_time": pd.Series([], dtype="datetime64[ns]"),
+                "crs": [],
+                "asset_key": [],
+                "stac_item_id": [],
+            },
+            geometry="geometry",
+            crs=catalog_crs,
+        )
+        catalog = InMemoryGeoCatalog(empty_gdf, backend="raster")
+    else:
+        gdf = gpd.GeoDataFrame(rows, geometry="geometry", crs=catalog_crs)
+        catalog = InMemoryGeoCatalog(gdf, backend="raster")
     if backend == "memory":
         return catalog
     if out_path is None:
@@ -207,12 +223,16 @@ def _item_to_rows(
             asset = item.assets[key]
         except KeyError as exc:
             raise KeyError(f"STAC item {item.id!r} has no asset {key!r}") from exc
+        # Per the STAC projection extension, an asset's `proj:epsg` /
+        # `proj:wkt2` overrides the item-level value when present.
+        asset_extras = getattr(asset, "extra_fields", None) or {}
+        asset_props = {**props, **asset_extras}
         row = {
             "filepath": asset.href,
             "geometry": geometry,
             "start_time": start,
             "end_time": end,
-            "crs": _asset_crs(props),
+            "crs": _asset_crs(asset_props),
             "asset_key": key,
             "stac_item_id": item.id,
         }
