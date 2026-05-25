@@ -1,32 +1,45 @@
 """Matchup engine and `MatchupRow` carrier.
 
-The engine takes a populated `GeoCatalog`, a primary / secondary
-selector, and spatial + temporal strategies; it emits `MatchupRow`
-instances ready to be persisted into ``matchups.parquet`` next to
-``items.parquet``.
+Joins iterables of `SourceRow`s on space + time:
 
-Scaffolding only — see ``docs/design/query-matchup.md`` §4.4 / §4.6.
+* Build a spatial index (STRtree) over the secondary footprints.
+* For each primary, query the index for spatial pre-candidates.
+* Apply the user's temporal strategy to narrow by time.
+* Apply the user's spatial strategy to confirm the match
+  (the index pre-filter accepts envelope overlap; the strategy
+  is the truth gate).
+* Emit a `MatchupRow` per surviving secondary, plus N-way fan-out
+  when ``secondary`` is a mapping of role → iterable.
+
+Once `catalog.ingest()` is wired up (subsequent PR), a thin wrapper
+will take a `GeoCatalog` + selector and stream rows into this engine.
+
+See ``docs/design/query-matchup.md`` §4.4 / §4.6.
 """
 
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Iterator, Mapping
+import uuid
+from collections.abc import Iterable, Iterator, Mapping
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
+
+import pandas as pd
 
 
 if TYPE_CHECKING:
-    from datetime import datetime
-
     import shapely.geometry.base
 
-    from geocatalog._src.base import GeoCatalog
     from geocatalog._src.matchup.spatial import SpatialStrategy
     from geocatalog._src.matchup.temporal import TemporalStrategy
+    from geocatalog._src.sources._base import SourceRow
 
 
-# A `Selector` filters the catalog before joining: ``{"source":
+# A `Selector` filters a catalog before joining: ``{"source":
 # "earthaccess", "collection": "MOD09GA"}``. Empty dict matches all.
+# Kept here for the future catalog-driven wrapper; the engine itself
+# takes iterables.
 Selector = Mapping[str, Any]
 
 
@@ -75,32 +88,71 @@ class MatchupRow:
 
 
 def matchup(
-    catalog: GeoCatalog,
+    primary: Iterable[SourceRow],
+    secondary: Iterable[SourceRow] | Mapping[str, Iterable[SourceRow]],
     *,
-    primary: Selector,
-    secondary: Selector | list[Selector],
     spatial: SpatialStrategy,
     temporal: TemporalStrategy,
     join: Literal["all", "any"] = "all",
     tag: str | None = None,
 ) -> Iterator[MatchupRow]:
-    """Find matching tuples of catalog rows.
+    """Find matching tuples of `SourceRow`s.
 
     Args:
-        catalog: Populated catalog to join against itself.
-        primary: Filter dict picking the primary rows
-            (e.g. ``{"source": "earthaccess", "collection": "MOD09GA"}``).
-        secondary: One filter (pairwise matchup) or a list (N-way).
-        spatial: Strategy deciding spatial matches.
-        temporal: Strategy deciding temporal matches.
-        join: ``"all"`` requires every secondary group to contribute;
-            ``"any"`` emits rows missing some members (handy for
-            opportunistic fusion).
-        tag: Optional user label persisted as ``query_set`` so a CLI
-            user can ``--matchup-tag foo`` later.
+        primary: Iterable of primary rows. Materialised lazily;
+            each row is processed once.
+        secondary: Either one iterable (pairwise — every secondary
+            gets the role ``"secondary"``) or a mapping of role →
+            iterable (N-way — each role indexed independently).
+            Secondaries are materialised into a spatial index so
+            each iterable is fully read before iteration begins.
+        spatial: Strategy deciding spatial matches
+            (e.g. ``Intersects()``, ``IouAtLeast(0.2)``).
+        temporal: Strategy deciding temporal matches
+            (e.g. ``NearestInTime(dt="6h")``).
+        join: ``"all"`` (default) requires every secondary role to
+            contribute a member; primaries with any empty role are
+            skipped. ``"any"`` emits matchups missing some roles —
+            handy for opportunistic fusion.
+        tag: Optional user label persisted as ``query_set`` so a
+            CLI user can ``--matchup-tag foo`` later.
 
     Yields:
-        `MatchupRow` instances. The caller persists them to
-        ``matchups.parquet`` via the catalog's writer.
+        `MatchupRow` instances, one per matched tuple. Each row's
+        ``matchup_id`` is a fresh uuid4 hex.
     """
-    raise NotImplementedError("matchup() is scaffolding — Phase 2 PR; see design §4.6.")
+    from geocatalog._src.matchup._engine_impl import run_matchup
+
+    yield from run_matchup(
+        primary=primary,
+        secondary=secondary,
+        spatial=spatial,
+        temporal=temporal,
+        join=join,
+        tag=tag,
+    )
+
+
+def _utcnow() -> datetime:
+    """Hoist for monkeypatching in deterministic tests."""
+    return datetime.now(tz=UTC)
+
+
+def _new_matchup_id() -> str:
+    """Hoist for monkeypatching in deterministic tests."""
+    return uuid.uuid4().hex
+
+
+def _midpoint_seconds(interval: pd.Interval, reference: datetime) -> float:
+    """Return ``(midpoint - reference).total_seconds()`` for an interval.
+
+    Used as the temporal-offset entry in `MatchupRow.time_offset_sec`.
+    The midpoint convention is symmetric across instantaneous and
+    range-shaped intervals.
+    """
+    mid = (
+        pd.Timestamp(interval.left)
+        + (pd.Timestamp(interval.right) - pd.Timestamp(interval.left)) / 2
+    )
+    mid = mid.tz_localize("UTC") if mid.tzinfo is None else mid.tz_convert("UTC")
+    return (mid.to_pydatetime() - reference).total_seconds()
