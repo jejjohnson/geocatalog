@@ -986,6 +986,7 @@ dependencies = [
     { name = "pyproj" },
     { name = "rasterio" },
     { name = "shapely" },
+    { name = "tenacity" },
     { name = "typing-extensions" },
 ]
 
@@ -1095,6 +1096,7 @@ requires-dist = [
     { name = "rioxarray", marker = "extra == 'full'", specifier = ">=0.15" },
     { name = "rioxarray", marker = "extra == 'xarray-raster'", specifier = ">=0.15" },
     { name = "shapely", specifier = ">=2.0" },
+    { name = "tenacity", specifier = ">=8.0" },
     { name = "typing-extensions", specifier = ">=4.0" },
     { name = "xarray", marker = "extra == 'full'", specifier = ">=2024.1" },
     { name = "xarray", marker = "extra == 'xarray-raster'", specifier = ">=2024.1" },

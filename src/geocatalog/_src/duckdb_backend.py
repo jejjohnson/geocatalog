@@ -43,6 +43,7 @@ if TYPE_CHECKING:
 from geocatalog._src.base import CatalogRow
 from geocatalog._src.geoslice import GeoSlice
 from geocatalog._src.memory import InMemoryGeoCatalog, _coerce_interval
+from geocatalog._src.retry import retry_transient_io
 
 
 # DuckDB is the optional dep for this backend. The module loader inside
@@ -172,6 +173,7 @@ class DuckDBGeoCatalog:
         *,
         backend: _BACKEND_T | None = None,
         crs: Any | None = None,
+        retries: int = 3,
     ) -> DuckDBGeoCatalog:
         """Open a GeoParquet file (or directory of shards) lazily.
 
@@ -206,6 +208,8 @@ class DuckDBGeoCatalog:
                 neither is present (noisy default rather than silent
                 coercion). For URI sources, ``None`` always falls back
                 to the default — pass ``crs=`` explicitly.
+            retries: Number of retries for transient remote I/O failures.
+                ``0`` disables retry/backoff.
 
         Returns:
             A `DuckDBGeoCatalog` over the relation.
@@ -231,17 +235,31 @@ class DuckDBGeoCatalog:
                     UserWarning,
                     stacklevel=2,
                 )
-            crs = _read_geoparquet_crs(source, default="EPSG:4326")
+            crs = retry_transient_io(
+                _read_geoparquet_crs,
+                source,
+                default="EPSG:4326",
+                retries=retries,
+            )
         if backend is None:
-            backend = _read_backend_tag(con, source_str, default="raster")
-        _check_schema_version(con, source_str)
+            backend = retry_transient_io(
+                _read_backend_tag,
+                con,
+                source_str,
+                default="raster",
+                retries=retries,
+            )
+        retry_transient_io(_check_schema_version, con, source_str, retries=retries)
         # Parameter binding (rather than f-string interpolation) keeps
         # paths containing apostrophes — `s3://bucket/o'malley/cat.parquet`
         # or tmpdirs under a username with one — from breaking the
         # query, and avoids opening a SQL-injection surface if `source`
         # ever flows from untrusted input.
-        relation = con.sql(
-            "SELECT * FROM read_parquet($src)", params={"src": source_str}
+        relation = retry_transient_io(
+            con.sql,
+            "SELECT * FROM read_parquet($src)",
+            params={"src": source_str},
+            retries=retries,
         )
         return cls(relation, con=con, crs=crs, backend=backend)
 

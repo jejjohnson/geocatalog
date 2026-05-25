@@ -48,6 +48,7 @@ dependencies = [
     # driven, so subcommands compose by adding type-hinted functions to
     # the App — no Click-style decorator boilerplate.
     "cyclopts>=2.0",
+    "tenacity>=8.0",
 ]
 
 [project.scripts]

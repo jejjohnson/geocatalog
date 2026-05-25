@@ -22,6 +22,7 @@ import pyarrow.parquet as pq
 
 from geocatalog._src.base import CatalogSchemaError
 from geocatalog._src.memory import InMemoryGeoCatalog
+from geocatalog._src.retry import retry_transient_io
 
 
 _BACKEND_T = Literal["raster", "xarray", "vector"]
@@ -170,7 +171,7 @@ def to_geoparquet(
     )
 
 
-def from_geoparquet(path: str | Path) -> InMemoryGeoCatalog:
+def from_geoparquet(path: str | Path, *, retries: int = 3) -> InMemoryGeoCatalog:
     """Load a GeoParquet file into an `InMemoryGeoCatalog`.
 
     Inverse of `to_geoparquet`: rebuilds the `IntervalIndex` from
@@ -190,6 +191,8 @@ def from_geoparquet(path: str | Path) -> InMemoryGeoCatalog:
     Args:
         path: Path to a GeoParquet file produced by `to_geoparquet`,
             DuckDB's ``COPY ... TO``, or any GeoParquet 1.x writer.
+        retries: Number of retries for transient remote I/O failures.
+            ``0`` disables retry/backoff.
 
     Returns:
         An `InMemoryGeoCatalog` with the same rows, CRS, and (where
@@ -202,8 +205,8 @@ def from_geoparquet(path: str | Path) -> InMemoryGeoCatalog:
     # Read the version *first* via a column-selective parquet load so
     # we can reject a v_future / multi-version artifact before paying
     # for the full read.
-    v_artifact = _read_schema_version(path)
-    gdf = gpd.read_parquet(Path(path))
+    v_artifact = retry_transient_io(_read_schema_version, path, retries=retries)
+    gdf = retry_transient_io(gpd.read_parquet, Path(path), retries=retries)
     backend_col = gdf.pop("_backend") if "_backend" in gdf.columns else None
     if "_schema_version" in gdf.columns:
         gdf = gdf.drop(columns=["_schema_version"])
