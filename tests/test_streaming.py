@@ -461,6 +461,161 @@ class TestPartitionedArchives:
         with pytest.raises(ValueError, match="requires a 'start_time' field"):
             _partition_value(row, "month")
 
+    def test_open_single_file_under_hive_dir_no_synthetic_columns(
+        self, tmp_path: Path
+    ) -> None:
+        """Opening a single file under `year=YYYY/...` must not inject `year`.
+
+        Regression for PR #41 review: `hive_partitioning=true` was hard-coded
+        on every `read_parquet` call, including the schema-version probe and
+        backend-tag probe. For a file sitting under a `key=value` directory
+        that always added a synthetic partition column to the catalog schema.
+        """
+        from geocatalog._src.parquet import to_geoparquet
+
+        partition_dir = tmp_path / "year=2024"
+        partition_dir.mkdir()
+        cat = _build_cat_for_open()
+        single = partition_dir / "data.parquet"
+        to_geoparquet(cat, single)
+
+        catalog = DuckDBGeoCatalog.open(single)
+        columns = catalog.relation.columns
+        assert "year" not in columns, (
+            f"single-file open injected synthetic 'year' column: {columns}"
+        )
+
+    def test_max_open_writers_correctness(self, tmp_path: Path) -> None:
+        """LRU eviction must preserve all rows across many partitions."""
+        from geocatalog._src.streaming import write_partitioned_rows
+
+        rows = []
+        for i in range(100):
+            rows.append(
+                {
+                    "filepath": f"f{i}.tif",
+                    "geometry": shapely.geometry.box(i, 0, i + 1, 1),
+                    "start_time": pd.Timestamp("2024-01-01") + pd.Timedelta(days=i),
+                    "end_time": pd.Timestamp("2024-01-02") + pd.Timedelta(days=i),
+                    "part": i,  # one partition per row -> 100 partitions
+                }
+            )
+        out = tmp_path / "partitioned"
+        n_written = write_partitioned_rows(
+            iter(rows),
+            out_path=out,
+            crs="EPSG:4326",
+            backend="raster",
+            partition_by=("part",),
+            max_open_writers=4,
+        )
+        assert n_written == 100
+
+        # Every partition got its own directory; reopen and count rows.
+        catalog = DuckDBGeoCatalog.open(out)
+        assert len(catalog) == 100
+        # Spot-check: row 42 is alive in part=42.
+        slice42 = catalog.sql("part = 42")
+        assert len(slice42) == 1
+        row42 = next(slice42.iter_rows())
+        assert row42.filepath == "f42.tif"
+
+    def test_max_open_writers_no_fd_leak(self, tmp_path: Path) -> None:
+        """The FD count after writing 100 partitions with cap=4 must be stable."""
+        import gc
+
+        from geocatalog._src.streaming import write_partitioned_rows
+
+        # Some FDs come and go during DuckDB init; settle first.
+        gc.collect()
+        before = _count_open_fds()
+
+        rows = []
+        for i in range(100):
+            rows.append(
+                {
+                    "filepath": f"f{i}.tif",
+                    "geometry": shapely.geometry.box(i, 0, i + 1, 1),
+                    "start_time": pd.Timestamp("2024-01-01") + pd.Timedelta(days=i),
+                    "end_time": pd.Timestamp("2024-01-02") + pd.Timedelta(days=i),
+                    "part": i,
+                }
+            )
+        write_partitioned_rows(
+            iter(rows),
+            out_path=tmp_path / "partitioned",
+            crs="EPSG:4326",
+            backend="raster",
+            partition_by=("part",),
+            max_open_writers=4,
+        )
+
+        gc.collect()
+        after = _count_open_fds()
+        # Tolerate small noise (logger handles, etc.); the unbounded version
+        # would leak ~100 FDs through the closing iteration if there were
+        # a leak, so a tolerance of 10 is plenty.
+        assert after - before < 10, (
+            f"FD leak: before={before} after={after} (cap=4, 100 partitions)"
+        )
+
+    def test_append_files_partition_layout_mismatch(self, tmp_path: Path) -> None:
+        """Appending with a different partition_by must raise ValueError."""
+        archive = tmp_path / "archive"
+        append_files(
+            archive,
+            [tmp_path / "2024-01-01-a.tif"],
+            _toy_extract,
+            crs="EPSG:4326",
+            backend="raster",
+            partition_by=("year", "month"),
+        )
+        with pytest.raises(
+            ValueError, match=r"partition_by=.*does not match.*existing layout"
+        ) as exc_info:
+            append_files(
+                archive,
+                [tmp_path / "2024-02-01-b.tif"],
+                _toy_extract,
+                crs="EPSG:4326",
+                backend="raster",
+                partition_by=("year",),
+            )
+        # Error message names both layouts so the user can debug.
+        msg = str(exc_info.value)
+        assert "year" in msg and "month" in msg
+
+
+def _build_cat_for_open():
+    """Build a tiny `InMemoryGeoCatalog` for `DuckDBGeoCatalog.open` tests."""
+    from geocatalog import InMemoryGeoCatalog
+
+    gdf = gpd.GeoDataFrame(
+        {
+            "filepath": ["a.tif"],
+            "geometry": [shapely.geometry.box(0, 0, 1, 1)],
+            "start_time": [pd.Timestamp("2024-01-15")],
+            "end_time": [pd.Timestamp("2024-01-16")],
+        },
+        geometry="geometry",
+        crs="EPSG:4326",
+    )
+    idx = pd.IntervalIndex.from_arrays(
+        gdf["start_time"], gdf["end_time"], closed="both", name="datetime"
+    )
+    gdf = gdf.drop(columns=["start_time", "end_time"]).set_index(idx)
+    return InMemoryGeoCatalog(gdf, backend="raster")
+
+
+def _count_open_fds() -> int:
+    """Best-effort open-FD count for the current process (POSIX only)."""
+    import os
+    import sys
+
+    if sys.platform.startswith("win"):
+        pytest.skip("FD counting requires POSIX")
+    return len(os.listdir(f"/proc/{os.getpid()}/fd"))
+
 
 # ---------------------------------------------------------------------------
 # EPSG:4326 default + cross-CRS smoke test

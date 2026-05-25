@@ -169,7 +169,9 @@ def to_geoparquet(
             downstream consumer chokes on 1.1.
         partition_by: Optional Hive partition columns for directory
             output. Built-in ``"year"``, ``"month"``, and ``"day"`` are
-            derived from ``start_time``.
+            derived from ``start_time``. Rows are streamed via
+            `gdf.itertuples` (much faster than `iterrows` on large
+            catalogs) and routed through `write_partitioned_rows`.
     """
     gdf = catalog.gdf.copy()
     if isinstance(gdf.index, pd.IntervalIndex):
@@ -179,7 +181,17 @@ def to_geoparquet(
     if partition_by is not None:
         from geocatalog._src.streaming import write_partitioned_rows
 
-        rows = (row.to_dict() for _, row in gdf.iterrows())
+        # `itertuples(index=False)` is ~10-50x faster than `iterrows()` on
+        # wide catalogs (`iterrows` materialises a `pd.Series` per row).
+        # Access columns by positional index — attribute access via
+        # `row.<colname>` chokes on names like ``eo:cloud_cover`` that
+        # aren't valid Python identifiers (pandas would silently rename
+        # them to ``_0``/etc.).
+        columns = list(gdf.columns)
+        rows = (
+            dict(zip(columns, tup, strict=True))
+            for tup in gdf.itertuples(index=False, name=None)
+        )
         write_partitioned_rows(
             rows,
             out_path=path,

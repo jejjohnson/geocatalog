@@ -789,10 +789,15 @@ def _read_geoparquet_crs(source: str | Path, *, default: str) -> Any:
     Directory sources are special-cased: we walk ``rglob("*.parquet")``
     and inspect the first shard found. All shards written by
     `StreamingParquetWriter` carry the same CRS, so one is
-    representative. Glob *strings* (``"shards/*.parquet"`` etc.) still
-    fall back to the default — there's no unambiguous "first shard" of
-    an arbitrary glob pattern without re-implementing the glob
-    expansion.
+    representative. A directory with no ``.parquet`` files raises
+    `FileNotFoundError` rather than silently falling back to the
+    default (mistyped path == data-loss bug otherwise).
+
+    Glob *strings* (``"shards/*.parquet"`` etc.) still fall back to the
+    default — there's no unambiguous "first shard" of an arbitrary
+    glob pattern without re-implementing the glob expansion, and
+    DuckDB's own glob support pulls from heterogeneous sources where
+    picking one shard could be misleading.
     """
     import json
 
