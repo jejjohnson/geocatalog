@@ -27,6 +27,8 @@ class TestLocalCache:
 
 
 class TestStage:
-    def test_not_implemented(self) -> None:
-        with pytest.raises(NotImplementedError):
+    def test_rejects_non_inmemory_catalog(self) -> None:
+        # `stage()` is implemented; behaviour coverage lives in
+        # `tests/test_staging.py`. Skeleton locks the guard.
+        with pytest.raises(TypeError, match="InMemoryGeoCatalog"):
             stage(catalog=object(), dest="/tmp/staged")  # type: ignore[arg-type]
