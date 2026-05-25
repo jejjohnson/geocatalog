@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -66,10 +67,50 @@ def fake_duckdb(monkeypatch: pytest.MonkeyPatch) -> _FakeConnection:
         ("://missing-scheme", None),
         ("C:/data/cat.parquet", None),
         ("C:\\data\\cat.parquet", None),
+        # `name:foo.parquet` is a local path in shell semantics — `urlsplit`
+        # would happily parse a ``scheme`` out of it, so guard against
+        # triggering remote-extension installs for those.
+        ("s3:catalog.parquet", None),
+        ("foo:bar.parquet", None),
     ],
 )
 def test_scheme(source: str | Path, scheme: str | None) -> None:
     assert duckdb_backend._scheme(source) == scheme
+
+
+def test_open_does_not_install_extensions_for_colon_local_paths(
+    fake_duckdb: _FakeConnection,
+) -> None:
+    """`s3:catalog.parquet` is a local path, not a URI — no httpfs install."""
+    cat = DuckDBGeoCatalog.open("s3:catalog.parquet")
+    assert isinstance(cat, DuckDBGeoCatalog)
+    assert fake_duckdb.commands == ["INSTALL spatial", "LOAD spatial"]
+
+
+def test_open_warns_when_uri_source_and_no_crs(
+    fake_duckdb: _FakeConnection,
+) -> None:
+    """URI sources can't auto-detect CRS; the user should be nudged."""
+    with pytest.warns(UserWarning, match="cannot auto-detect CRS"):
+        DuckDBGeoCatalog.open("s3://bucket/cat.parquet")
+
+
+def test_open_no_warning_when_uri_source_and_explicit_crs(
+    fake_duckdb: _FakeConnection,
+) -> None:
+    """No warning when the caller heeds the docstring and passes `crs=`."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        DuckDBGeoCatalog.open("s3://bucket/cat.parquet", crs="EPSG:4326")
+
+
+def test_open_no_warning_for_local_path_without_crs(
+    fake_duckdb: _FakeConnection,
+) -> None:
+    """Local paths use the real metadata reader; no warning needed."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        DuckDBGeoCatalog.open(Path("cat.parquet"))
 
 
 @pytest.mark.parametrize(

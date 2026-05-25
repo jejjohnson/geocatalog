@@ -21,6 +21,7 @@ Why DuckDB:
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Iterator
 from functools import cached_property
 from pathlib import Path
@@ -80,15 +81,25 @@ def _ensure_spatial(con: duckdb_mod.DuckDBPyConnection) -> None:
 def _scheme(source: str | Path) -> str | None:
     """Return the lowercase URI scheme for ``source``, or ``None`` for paths.
 
+    Only strings containing ``://`` are treated as URIs. Shell-style
+    ``name:foo.parquet`` (e.g. ``s3:catalog.parquet``) is a *local path*
+    in POSIX semantics, not an S3 URI — `urlsplit` would still parse a
+    ``scheme`` out of it, so we gate on the ``://`` separator first to
+    avoid triggering remote-extension installs for local files.
+
     Examples:
         >>> _scheme("s3://bucket/cat.parquet")
         's3'
+        >>> _scheme("s3:catalog.parquet")
+        None
         >>> _scheme(Path("cat.parquet"))
         None
         >>> _scheme("C:/data/cat.parquet")
         None
     """
     if isinstance(source, Path):
+        return None
+    if "://" not in source:
         return None
     if (
         len(source) >= 3
@@ -167,7 +178,16 @@ class DuckDBGeoCatalog:
         ``hf://`` auto-load DuckDB's `httpfs` extension; ``az://`` and
         ``azure://`` auto-load DuckDB's `azure` extension.
 
-        CRS is recovered from the GeoParquet column metadata (PROJJSON).
+        CRS is recovered from the GeoParquet column metadata (PROJJSON)
+        for **local files only** — the metadata reader uses
+        `pyarrow.parquet.read_metadata` over a local `Path`. For URI
+        sources (``s3://``, ``https://``, ``hf://``, …) the auto-detect
+        cannot reach the remote object and silently falls back to the
+        ``EPSG:4326`` default; a `UserWarning` is emitted in that case.
+        Pass ``crs=`` explicitly for remote sources to avoid the
+        fallback. (Remote GeoParquet CRS introspection would need an
+        fsspec/pyarrow filesystem hookup and is tracked separately.)
+
         The backend tag is recovered from the reserved ``_backend``
         column written by `to_geoparquet`; ad-hoc parquet files lacking
         it default to ``"raster"`` unless overridden.
@@ -178,8 +198,10 @@ class DuckDBGeoCatalog:
             backend: Loader dispatch tag override. ``None`` reads the
                 ``_backend`` column, falling back to ``"raster"``.
             crs: CRS override. ``None`` reads the GeoParquet PROJJSON
-                metadata; falls back to ``EPSG:4326`` if neither is
-                present (noisy default rather than silent coercion).
+                metadata for local files; falls back to ``EPSG:4326`` if
+                neither is present (noisy default rather than silent
+                coercion). For URI sources, ``None`` always falls back
+                to the default — pass ``crs=`` explicitly.
 
         Returns:
             A `DuckDBGeoCatalog` over the relation.
@@ -196,6 +218,15 @@ class DuckDBGeoCatalog:
             con.execute("INSTALL azure")
             con.execute("LOAD azure")
         if crs is None:
+            if scheme is not None:
+                warnings.warn(
+                    f"DuckDBGeoCatalog.open({source_str!r}): cannot auto-detect "
+                    "CRS from a remote URI; falling back to EPSG:4326. Pass "
+                    "`crs=` explicitly for remote sources to avoid silent "
+                    "default coercion.",
+                    UserWarning,
+                    stacklevel=2,
+                )
             crs = _read_geoparquet_crs(source, default="EPSG:4326")
         if backend is None:
             backend = _read_backend_tag(con, source_str, default="raster")
