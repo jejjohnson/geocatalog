@@ -159,6 +159,27 @@ The artifact is GeoParquet 1.1 compatible — readable by DuckDB,
 geopandas, GDAL, pandas. The Phase 2 DuckDB backend reads the *same*
 file.
 
+## Reading from cloud object storage
+
+Install `geocatalog[fsspec]` to read catalog artifacts and catalog row
+filepaths from object-store and HTTP URIs such as `s3://`, `gs://`,
+`gcs://`, `az://`, `azure://`, `https://`, and `hf://` without writing
+GDAL VSI prefixes by hand:
+
+```python
+import geocatalog as gc
+
+catalog = gc.open_catalog(
+    "s3://my-bucket/catalog.parquet",
+    storage_options={"anon": True},
+)
+chip = gc.load_raster(catalog, aoi, storage_options={"anon": True})
+```
+
+Local paths continue to pass through unchanged. If a cloud URI is used
+without the `[fsspec]` extra, `geocatalog` raises an `ImportError` that
+points to `pip install 'geocatalog[fsspec]'`.
+
 ## Bridging to a patcher
 
 `CatalogDomain` adapts a catalog into a `Domain` shape (bounds + an

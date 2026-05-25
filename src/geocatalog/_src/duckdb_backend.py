@@ -174,6 +174,7 @@ class DuckDBGeoCatalog:
         backend: _BACKEND_T | None = None,
         crs: Any | None = None,
         retries: int = 3,
+        storage_options: dict[str, Any] | None = None,
     ) -> DuckDBGeoCatalog:
         """Open a GeoParquet file (or directory of shards) lazily.
 
@@ -210,6 +211,12 @@ class DuckDBGeoCatalog:
                 to the default — pass ``crs=`` explicitly.
             retries: Number of retries for transient remote I/O failures.
                 ``0`` disables retry/backoff.
+            storage_options: Not supported by this backend — DuckDB reads
+                URIs natively via its `httpfs` / `azure` extensions and
+                does not accept an fsspec-style credential mapping. Pass
+                ``None``; configure DuckDB secrets (or pre-set env vars)
+                before calling `open`. Use ``engine='memory'`` if you need
+                fsspec-backed reads.
 
         Returns:
             A `DuckDBGeoCatalog` over the relation.
@@ -218,6 +225,13 @@ class DuckDBGeoCatalog:
         con = dd.connect()
         _ensure_spatial(con)
         source_str = str(source)
+        if storage_options is not None:
+            raise ValueError(
+                "DuckDBGeoCatalog does not support storage_options. Use "
+                "open_catalog(source, engine='memory', storage_options=...) "
+                "for fsspec-backed reads (loads the full catalog into memory), "
+                "or configure DuckDB credentials directly."
+            )
         scheme = _scheme(source)
         if scheme in ("s3", "gs", "gcs", "https", "http", "r2", "hf"):
             con.execute("INSTALL httpfs")
