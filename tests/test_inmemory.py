@@ -385,24 +385,6 @@ class TestIterRows:
 
         assert row.filepath == str(catalog.gdf.index[0])
 
-
-class TestIterSlices:
-    def test_yields_one_per_row(self, two_tile_catalog: InMemoryGeoCatalog) -> None:
-        slices = list(two_tile_catalog.iter_slices(resolution=(10.0, 10.0)))
-        assert len(slices) == 2
-        for s in slices:
-            assert isinstance(s, GeoSlice)
-            assert s.resolution == (10.0, 10.0)
-
-    def test_slice_bounds_match_footprints(
-        self, two_tile_catalog: InMemoryGeoCatalog
-    ) -> None:
-        slices = list(two_tile_catalog.iter_slices(resolution=(10.0, 10.0)))
-        np.testing.assert_allclose(slices[0].bounds, (0, 0, 100, 100))
-        np.testing.assert_allclose(slices[1].bounds, (200, 0, 300, 100))
-
-
-class TestIterRows:
     def test_does_not_leak_bbox_or_schema_metadata_into_extras(self) -> None:
         """Regression for the P2 bug where the GeoParquet 1.1 ``bbox``
         covering struct and underscore-prefixed schema columns
@@ -434,6 +416,22 @@ class TestIterRows:
         assert "_internal" not in extras
         assert not any(k.startswith("_") for k in extras)
         assert extras["eo:cloud_cover"] == 7.5
+
+
+class TestIterSlices:
+    def test_yields_one_per_row(self, two_tile_catalog: InMemoryGeoCatalog) -> None:
+        slices = list(two_tile_catalog.iter_slices(resolution=(10.0, 10.0)))
+        assert len(slices) == 2
+        for s in slices:
+            assert isinstance(s, GeoSlice)
+            assert s.resolution == (10.0, 10.0)
+
+    def test_slice_bounds_match_footprints(
+        self, two_tile_catalog: InMemoryGeoCatalog
+    ) -> None:
+        slices = list(two_tile_catalog.iter_slices(resolution=(10.0, 10.0)))
+        np.testing.assert_allclose(slices[0].bounds, (0, 0, 100, 100))
+        np.testing.assert_allclose(slices[1].bounds, (200, 0, 300, 100))
 
 
 class TestWhere:
