@@ -24,10 +24,13 @@ installing geopatcher directly).
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
+from urllib.parse import urlparse
 
 
 if TYPE_CHECKING:
+    from geopatcher import Field
+
     from geocatalog._src.base import GeoCatalog
 
 
@@ -37,19 +40,28 @@ _GEOPATCHER_HINT = (
 )
 
 
+# Schemes that resolve to a local file we can hand to RasterioReader
+# without a network round-trip. Anything else (https://, s3://, gs://, …)
+# means staging didn't actually fetch the bytes — typically a
+# `stage(on_error="skip")` row whose original URI was preserved.
+_LOCAL_URI_SCHEMES = frozenset({"", "file"})
+
+
 def field_for(
     catalog: GeoCatalog,
     asset: str | None = None,
     *,
     mode: str = "raster",
-) -> list[Any]:
+) -> list[Field]:
     """Build one geopatcher `Field` per row of a staged catalog.
 
     Args:
         catalog: A catalog whose rows reference local files. Typically
             the output of `stage()` — its ``filepath`` column (and
             ``assets`` JSON map, when present) point at cached copies
-            already on disk.
+            already on disk. The catalog's ``backend`` must be
+            ``"raster"`` when ``mode="raster"`` (the only mode today);
+            other backends raise.
         asset: Which asset key to read for each row. ``None`` falls
             back to the row's ``filepath`` column — the right default
             for catalogs built by `build_raster_catalog` (which don't
@@ -70,12 +82,15 @@ def field_for(
 
     Raises:
         ImportError: If geopatcher is not installed.
-        ValueError: If ``mode`` is not a supported flavor, or if the
-            catalog is empty.
+        ValueError: If ``mode`` is not a supported flavor, the catalog
+            is empty, or the catalog's ``backend`` does not match
+            ``mode`` (e.g. ``backend="vector"`` with ``mode="raster"``).
         KeyError: If ``asset`` is a string and any row's asset map
-            does not contain that key. Catalogs where staging dropped
-            a key under ``on_error="skip"`` will still surface here —
-            the row's local path simply isn't available.
+            does not contain that key, or if any resolved path is a
+            non-local URI — which happens when ``stage(on_error="skip")``
+            preserved an unstaged URI for a row whose fetch failed.
+            The error message points at the offending row + URI so the
+            caller can retry staging or drop the row.
     """
     try:
         from geopatcher import RasterField
@@ -85,11 +100,47 @@ def field_for(
 
     if mode != "raster":
         raise ValueError(f"field_for(mode={mode!r}): only 'raster' is supported today.")
+    # `backend` is set by every catalog constructor we ship; tolerate
+    # third-party catalogs that omit it by skipping the check rather
+    # than crashing with AttributeError.
+    backend = getattr(catalog, "backend", None)
+    if backend is not None and mode == "raster" and backend != "raster":
+        raise ValueError(
+            f"field_for(mode='raster') requires a raster-backed catalog; "
+            f"got backend={backend!r}. Pass a catalog produced by "
+            "`build_raster_catalog` / `stage()` over raster sources."
+        )
     if len(catalog) == 0:
         raise ValueError("field_for: catalog is empty; nothing to wrap.")
 
     paths = _resolve_paths(catalog, asset=asset)
+    _reject_unstaged_uris(paths, asset=asset)
     return [RasterField(RasterioReader(p)) for p in paths]
+
+
+def _reject_unstaged_uris(paths: list[str], *, asset: str | None) -> None:
+    """Surface unstaged remote URIs as a `KeyError` with row context.
+
+    `stage(on_error="skip")` preserves the original URI on a row whose
+    fetch failed, which silently turns into a `RasterField` pointing
+    at a remote object if `field_for` doesn't catch it. We want a loud
+    failure so the user can either retry staging or drop the row.
+    """
+    bad: list[tuple[int, str]] = []
+    for row_idx, p in enumerate(paths):
+        scheme = urlparse(p).scheme
+        if scheme not in _LOCAL_URI_SCHEMES:
+            bad.append((row_idx, p))
+    if not bad:
+        return
+    asset_clause = f"asset {asset!r}" if asset is not None else "filepath"
+    sample = ", ".join(f"row {i}: {u!r}" for i, u in bad[:3])
+    suffix = f" (and {len(bad) - 3} more)" if len(bad) > 3 else ""
+    raise KeyError(
+        f"field_for: {asset_clause} resolved to non-local URIs on "
+        f"{len(bad)} row(s); re-run stage() (or drop the rows). "
+        f"Examples: {sample}{suffix}."
+    )
 
 
 def _resolve_paths(catalog: GeoCatalog, *, asset: str | None) -> list[str]:

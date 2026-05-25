@@ -74,7 +74,9 @@ gee = ["earthengine-api>=0.1.380"]
 # `field_for()` bridge — lets `geocatalog.stage()` output flow straight
 # into a `geopatcher.SpatialPatcher` without manual `RasterField`
 # construction. See `docs/design/query-matchup.md` §8 (Phase 4).
-patch = ["geopatcher>=0.0.2"]
+# Direct git URL (PEP 508) until geopatcher reaches PyPI; once published,
+# swap to `geopatcher>=X.Y` and drop the URL.
+patch = ["geopatcher @ git+https://github.com/jejjohnson/geopatcher.git"]
 sources-all = [
     "earthaccess>=0.10",
     "pystac-client>=0.7",
@@ -92,8 +94,9 @@ full = [
     "pystac-client>=0.7",
     "planetary-computer>=1.0",
     "earthengine-api>=0.1.380",
-    # geopatcher bridge — exposes `geocatalog.staging.field_for`.
-    "geopatcher>=0.0.2",
+    # geopatcher bridge — exposes `geocatalog.staging.field_for`. Pinned
+    # via direct URL until the first PyPI release; see `[patch]` extra.
+    "geopatcher @ git+https://github.com/jejjohnson/geopatcher.git",
 ]
 
 [project.urls]
@@ -143,16 +146,21 @@ docs = [
 ]
 
 [tool.uv.sources]
-# Dev-time source for the `[patch]` extra: pull `geopatcher` from
-# GitHub until the first PyPI release lands. This stanza affects
-# `uv lock` / `uv sync` only — published wheel metadata still
-# carries the PyPI-flavoured `geopatcher` requirement from
-# `[project.optional-dependencies] patch = ["geopatcher>=0.0.2"]`.
+# `uv sync --extra patch` honours this stanza directly. `pip install`
+# users follow the PEP 508 git URL pinned in `[project.optional-dependencies]
+# patch`, so both tooling paths resolve to the same source until the
+# first PyPI release lands.
 geopatcher = { git = "https://github.com/jejjohnson/geopatcher" }
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+# Required so the `[patch]` extra can pin geopatcher via a PEP 508
+# direct URL (`geopatcher @ git+https://...`) until the first PyPI
+# release lands. Drop this when geopatcher publishes.
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/geocatalog"]
