@@ -224,6 +224,19 @@ class TestCMRQuery:
         rows = list(CMRSource().query(bounds=(-10, 35, 5, 45), limit=3))
         assert len(rows) == 3
 
+    def test_limit_zero_emits_nothing_without_request(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A `limit=0` query must short-circuit before issuing any
+        # request. Patch `urlopen` to a sentinel that would fail the
+        # test if it ever got called.
+        def fail(*_a: Any, **_kw: Any) -> Any:
+            raise AssertionError("urlopen should not be called when limit=0")
+
+        monkeypatch.setattr("geocatalog._src.sources.cmr.urllib.request.urlopen", fail)
+        assert list(CMRSource().query(bounds=(-10, 35, 5, 45), limit=0)) == []
+        assert list(CMRSource().query(bounds=(-10, 35, 5, 45), limit=-1)) == []
+
     def test_filters_forwarded_as_url_params(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -273,6 +286,69 @@ class TestCMRAuthStatus:
         status = CMRSource(token="abc").auth_status()
         assert status.authenticated is True
         assert "token set" in (status.detail or "")
+
+    def test_non_200_marks_unauthenticated_with_status_detail(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Even though urlopen returned, a non-200 status should not
+        # report "reachable" — instead surface the status code.
+        monkeypatch.setattr(
+            "geocatalog._src.sources.cmr.urllib.request.urlopen",
+            lambda req, *, timeout=10.0: _FakeResponse({"items": []}, status=503),
+        )
+        status = CMRSource().auth_status()
+        assert status.authenticated is False
+        assert "status 503" in (status.detail or "")
+
+
+class TestCMRGeometryHardening:
+    """Regression — malformed UMM should be skipped, not crash."""
+
+    def _spatial(self, geom: dict[str, Any]) -> dict[str, Any]:
+        return {"HorizontalSpatialDomain": {"Geometry": geom}}
+
+    def test_gpolygon_missing_coordinates_skipped(self) -> None:
+        from geocatalog._src.sources.cmr import _granule_geometry
+
+        # Two valid points + one missing Latitude → the bad point is
+        # dropped silently. With the bad one filtered out, only 2
+        # vertices remain (< 3 required for a polygon), so the whole
+        # GPolygon is skipped — no KeyError raised.
+        umm = {
+            "SpatialExtent": self._spatial(
+                {
+                    "GPolygons": [
+                        {
+                            "Boundary": {
+                                "Points": [
+                                    {"Longitude": 0.0, "Latitude": 0.0},
+                                    {"Longitude": 1.0, "Latitude": 0.0},
+                                    {"Longitude": 1.0},  # missing Latitude
+                                ]
+                            }
+                        }
+                    ]
+                }
+            )
+        }
+        assert _granule_geometry(umm) is None
+
+    def test_points_missing_coordinates_skipped(self) -> None:
+        from geocatalog._src.sources.cmr import _granule_geometry
+
+        umm = {
+            "SpatialExtent": self._spatial(
+                {
+                    "Points": [
+                        {"Longitude": 0.0, "Latitude": 0.0},
+                        {"Longitude": 1.0},  # missing Latitude → skipped
+                    ]
+                }
+            )
+        }
+        geom = _granule_geometry(umm)
+        assert geom is not None
+        assert geom.geom_type == "Point"
 
 
 # ---------------------------------------------------------------------------

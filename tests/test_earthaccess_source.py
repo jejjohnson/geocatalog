@@ -151,6 +151,50 @@ class TestGranuleGeometry:
         assert _granule_geometry(umm) is None
         assert _granule_geometry({}) is None
 
+    def test_gpolygon_missing_coordinates_skipped(self) -> None:
+        # A polygon point missing Latitude/Longitude must be skipped
+        # silently rather than raising KeyError (UMM occasionally
+        # carries partial point objects).
+        umm = {
+            "SpatialExtent": {
+                "HorizontalSpatialDomain": {
+                    "Geometry": {
+                        "GPolygons": [
+                            {
+                                "Boundary": {
+                                    "Points": [
+                                        {"Longitude": 0.0, "Latitude": 0.0},
+                                        {"Longitude": 1.0, "Latitude": 0.0},
+                                        {"Longitude": 1.0},  # no Latitude
+                                    ]
+                                }
+                            }
+                        ]
+                    }
+                }
+            }
+        }
+        # Two surviving points < 3 → polygon dropped, geometry is None.
+        assert _granule_geometry(umm) is None
+
+    def test_points_missing_coordinates_skipped(self) -> None:
+        umm = {
+            "SpatialExtent": {
+                "HorizontalSpatialDomain": {
+                    "Geometry": {
+                        "Points": [
+                            {"Longitude": 1.0, "Latitude": 2.0},
+                            {"Latitude": 3.0},  # no Longitude
+                        ]
+                    }
+                }
+            }
+        }
+        geom = _granule_geometry(umm)
+        assert geom is not None
+        assert geom.geom_type == "Point"
+        assert (geom.x, geom.y) == (1.0, 2.0)
+
 
 class TestGranuleInterval:
     def test_range_to_interval(self) -> None:

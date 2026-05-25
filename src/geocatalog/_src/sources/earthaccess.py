@@ -14,9 +14,10 @@ granule schema. Field paths consulted:
   footprint. Supports the three common shapes: ``GPolygons``,
   ``BoundingRectangles``, ``Points``.
 * ``granule.data_links()`` — asset URLs.
-* ``umm`` itself — preserved verbatim under
-  ``SourceRow.properties["umm"]`` so downstream code retains
-  access to anything we didn't promote.
+* ``umm`` — a bounded subset (see ``_umm_essentials``) stored
+  under ``SourceRow.properties["umm"]``. Full UMM dicts can be
+  several KB per granule; downstream code wanting the raw record
+  should re-query via earthaccess.
 """
 
 from __future__ import annotations
@@ -143,12 +144,13 @@ class EarthAccessSource(Source):
     def auth_status(self) -> AuthStatus:
         """Check whether `earthaccess` is logged in.
 
-        Tries `earthaccess.get_username()` (a cheap call that
-        only succeeds when credentials are valid). Adapter calls
-        ``earthaccess.login(persist=True)`` once on the user's
-        behalf if the env var ``EARTHDATA_USERNAME`` is set; we
-        intentionally don't do that automatically here — surface
-        the bare credential state and let the caller decide.
+        Builds a requests session via
+        ``earthaccess.get_requests_https_session()`` and inspects
+        the ``earthaccess.__auth__`` singleton's ``authenticated``
+        flag — a cheap, non-network probe of the cached login
+        state. The adapter does *not* call ``earthaccess.login()``
+        automatically; surface the bare credential state and let
+        the caller decide whether to prompt for credentials.
         """
         try:
             session = earthaccess.get_requests_https_session()
@@ -299,7 +301,15 @@ def _granule_geometry(
             points = boundary.get("Points") if isinstance(boundary, Mapping) else None
             if not points:
                 continue
-            ring = [(pt["Longitude"], pt["Latitude"]) for pt in points]
+            ring: list[tuple[float, float]] = []
+            for pt in points:
+                if not isinstance(pt, Mapping):
+                    continue
+                lon = pt.get("Longitude")
+                lat = pt.get("Latitude")
+                if lon is None or lat is None:
+                    continue
+                ring.append((lon, lat))
             if len(ring) >= 3:
                 polys.append(shapely.geometry.Polygon(ring))
         if polys:
@@ -329,11 +339,15 @@ def _granule_geometry(
     # collections — e.g. AERONET station data).
     points = geom.get("Points")
     if points:
-        shapes = [
-            shapely.geometry.Point(pt["Longitude"], pt["Latitude"])
-            for pt in points
-            if isinstance(pt, Mapping)
-        ]
+        shapes = []
+        for pt in points:
+            if not isinstance(pt, Mapping):
+                continue
+            lon = pt.get("Longitude")
+            lat = pt.get("Latitude")
+            if lon is None or lat is None:
+                continue
+            shapes.append(shapely.geometry.Point(lon, lat))
         if shapes:
             return shapely.geometry.MultiPoint(shapes) if len(shapes) > 1 else shapes[0]
     return None

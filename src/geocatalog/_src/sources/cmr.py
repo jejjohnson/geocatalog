@@ -86,6 +86,12 @@ class CMRSource(Source):
             `SourceRow` per matching granule. Streamed via pagination
             so a large collection doesn't materialise in one chunk.
         """
+        # A caller passing `limit <= 0` is asking for nothing — honour
+        # that explicitly. Without this guard the page-size math below
+        # would clamp to `max(..., 1)` and emit a single row.
+        if limit is not None and limit <= 0:
+            return
+
         query_id = uuid.uuid4().hex
         fetched_at = datetime.now(tz=UTC)
 
@@ -152,18 +158,24 @@ class CMRSource(Source):
             if self.token:
                 req.add_header("Authorization", f"Bearer {self.token}")
             with urllib.request.urlopen(req, timeout=10.0) as resp:
-                ok = resp.status == 200
+                status = resp.status
         except Exception as exc:
             return AuthStatus(
                 source=self.name,
                 authenticated=False,
                 detail=f"could not reach {self.endpoint}: {exc}",
             )
+        ok = status == 200
+        if ok:
+            detail = f"reachable at {self.endpoint}" + (
+                " (token set)" if self.token else " (anonymous)"
+            )
+        else:
+            detail = f"{self.endpoint} returned status {status}"
         return AuthStatus(
             source=self.name,
             authenticated=ok,
-            detail=f"reachable at {self.endpoint}"
-            + (" (token set)" if self.token else " (anonymous)"),
+            detail=detail,
         )
 
 
@@ -286,7 +298,15 @@ def _granule_geometry(
             points = boundary.get("Points") if isinstance(boundary, Mapping) else None
             if not points:
                 continue
-            ring = [(pt["Longitude"], pt["Latitude"]) for pt in points]
+            ring: list[tuple[float, float]] = []
+            for pt in points:
+                if not isinstance(pt, Mapping):
+                    continue
+                lon = pt.get("Longitude")
+                lat = pt.get("Latitude")
+                if lon is None or lat is None:
+                    continue
+                ring.append((lon, lat))
             if len(ring) >= 3:
                 polys.append(shapely.geometry.Polygon(ring))
         if polys:
@@ -312,11 +332,15 @@ def _granule_geometry(
             return shapely.geometry.MultiPolygon(boxes) if len(boxes) > 1 else boxes[0]
     points = geom.get("Points")
     if points:
-        shapes = [
-            shapely.geometry.Point(pt["Longitude"], pt["Latitude"])
-            for pt in points
-            if isinstance(pt, Mapping)
-        ]
+        shapes = []
+        for pt in points:
+            if not isinstance(pt, Mapping):
+                continue
+            lon = pt.get("Longitude")
+            lat = pt.get("Latitude")
+            if lon is None or lat is None:
+                continue
+            shapes.append(shapely.geometry.Point(lon, lat))
         if shapes:
             return shapely.geometry.MultiPoint(shapes) if len(shapes) > 1 else shapes[0]
     return None
