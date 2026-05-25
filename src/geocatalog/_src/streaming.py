@@ -65,6 +65,7 @@ def _iter_rows_parallel(
     extract_fn: Callable[[str | Path], dict[str, Any] | None],
     *,
     n_workers: int = 1,
+    ordered: bool = False,
 ) -> Iterator[dict[str, Any]]:
     """Yield per-file row dicts, optionally extracted across a process pool.
 
@@ -79,13 +80,23 @@ def _iter_rows_parallel(
             with no `multiprocessing` overhead. ``>1`` spawns a process
             pool with the ``"spawn"`` start method (rasterio + ``fork``
             deadlocks on macOS — spawn is the portable default).
+        ordered: With ``n_workers>1``, yield rows in input order instead
+            of completion order. Keeps the pending-future buffer bounded
+            by ``n_workers``. A slow input EARLIER in the queue stalls
+            every subsequent yield AND can temporarily reduce parallelism
+            (workers may sit idle while the coordinator waits for the
+            next-in-line future before refilling). The cost is most
+            visible on skewed workloads where the first few inputs take
+            much longer than the rest. For workloads with significant
+            variance, prefer ``ordered=False`` and sort post-hoc if you
+            need a stable byte layout.
 
     Yields:
         Row dicts. ``None`` returns from ``extract_fn`` are filtered out
         (filenames that didn't match the regex etc.). With ``n_workers=1``
-        the order is the input order; with ``n_workers>1`` the order is
-        completion order — callers needing deterministic output should
-        apply a ``sort_by`` rewrite downstream.
+        the order is the input order. With ``n_workers>1`` the default
+        order is completion order; pass ``ordered=True`` for input order
+        without requiring a downstream ``sort_by`` rewrite.
     """
     if n_workers < 1:
         raise ValueError(f"n_workers must be >= 1; got {n_workers}")
@@ -101,12 +112,43 @@ def _iter_rows_parallel(
     # avoids the O(n_files) coordinator-memory blowup of
     # `ProcessPoolExecutor.map(fn, list(filepaths))`, which materialises
     # the full input list and queues every future up front.
-    window = max(n_workers * 4, 8)
+    # Ordered mode waits for the next-in-line future, so keep only one
+    # worker-width of results buffered behind any slow file.
+    window = n_workers if ordered else max(n_workers * 4, 8)
     with concurrent.futures.ProcessPoolExecutor(
         max_workers=n_workers,
         mp_context=ctx,
     ) as pool:
         iterator = iter(filepaths)
+        if ordered:
+            indexed = enumerate(iterator)
+            pending_by_index: dict[
+                int,
+                concurrent.futures.Future[dict[str, Any] | None],
+            ] = {}
+
+            def submit_next() -> None:
+                try:
+                    idx, fp = next(indexed)
+                except StopIteration:
+                    return
+                pending_by_index[idx] = pool.submit(extract_fn, fp)
+
+            for _ in range(window):
+                submit_next()
+            next_yield = 0
+            while pending_by_index:
+                fut = pending_by_index[next_yield]
+                try:
+                    row = fut.result()
+                finally:
+                    del pending_by_index[next_yield]
+                    next_yield += 1
+                submit_next()
+                if row is not None:
+                    yield row
+            return
+
         pending: set[concurrent.futures.Future[dict[str, Any] | None]] = set()
         # Prime the window.
         for fp in itertools.islice(iterator, window):
@@ -511,6 +553,7 @@ def stream_build_duckdb(
     sort_by: tuple[str, ...] | None = ("start_time", "geometry_hilbert"),
     batch_size: int = 10_000,
     n_workers: int = 1,
+    ordered: bool = False,
 ) -> DuckDBGeoCatalog:
     """Stream-build a `DuckDBGeoCatalog` artifact from per-file extraction.
 
@@ -532,6 +575,13 @@ def stream_build_duckdb(
             rewrite and leaves rows in extraction order.
         batch_size: Streaming batch size.
         n_workers: Process-pool size for extraction.
+        ordered: With ``n_workers>1``, preserve input row order instead of
+            completion order. Useful for reproducible artifacts when
+            ``sort_by=None``. A slow input earlier in the queue stalls
+            every subsequent yield and can temporarily reduce parallelism
+            (workers may sit idle waiting on the next-in-line future).
+            Prefer ``ordered=False`` for skewed workloads and sort
+            post-hoc if you need a stable byte layout.
 
     Returns:
         A `DuckDBGeoCatalog` opened on ``out_path``.
@@ -584,7 +634,12 @@ def stream_build_duckdb(
             write_bbox=write_bbox,
             batch_size=batch_size,
         ) as writer:
-            for row in _iter_rows_parallel(filepaths, extract_fn, n_workers=n_workers):
+            for row in _iter_rows_parallel(
+                filepaths,
+                extract_fn,
+                n_workers=n_workers,
+                ordered=ordered,
+            ):
                 writer.write_row(row)
                 rows_written += 1
 
