@@ -19,10 +19,21 @@ from geocatalog._src.sources import AuthStatus, Source, SourceRow
 
 class TestSourceProtocol:
     def test_protocol_is_runtime_checkable(self) -> None:
-        # `isinstance(x, Source)` works because the Protocol is
-        # decorated `@runtime_checkable`. We only need the duck-typed
-        # surface; the adapters under `_src/sources/*` satisfy it.
-        assert hasattr(Source, "query")
+        # The whole point of `@runtime_checkable` is `isinstance` works
+        # against duck-typed implementations. Build a tiny stub that
+        # quacks like `Source` and confirm it passes `isinstance`.
+        # If the decorator gets removed, this test fails — which is
+        # the contract we want locked in.
+        class _Stub:
+            name = "stub"
+
+            def query(self, bounds, interval=None, **kw):
+                return iter(())
+
+            def auth_status(self):
+                return AuthStatus(source="stub", authenticated=True)
+
+        assert isinstance(_Stub(), Source)
 
     def test_subnamespace_reexports(self) -> None:
         assert sources_ns.Source is Source

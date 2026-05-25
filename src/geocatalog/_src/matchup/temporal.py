@@ -58,7 +58,11 @@ class NearestInTime:
 
     dt: timedelta | str
 
-    def filter(self, primary, candidates):
+    def filter(
+        self,
+        primary: pd.Interval,
+        candidates: pd.IntervalIndex,
+    ) -> pd.IntervalIndex:
         raise NotImplementedError("Phase 2 PR — see design §4.6.")
 
 
@@ -78,7 +82,11 @@ class WithinWindow:
     start: timedelta | str
     end: timedelta | str
 
-    def filter(self, primary, candidates):
+    def filter(
+        self,
+        primary: pd.Interval,
+        candidates: pd.IntervalIndex,
+    ) -> pd.IntervalIndex:
         raise NotImplementedError("Phase 2 PR — see design §4.6.")
 
 
@@ -97,5 +105,9 @@ class Synchronous:
 
     tolerance: timedelta | str = "0s"
 
-    def filter(self, primary, candidates):
+    def filter(
+        self,
+        primary: pd.Interval,
+        candidates: pd.IntervalIndex,
+    ) -> pd.IntervalIndex:
         raise NotImplementedError("Phase 2 PR — see design §4.6.")

@@ -6,15 +6,20 @@ into a local cache and rewrites a catalog to point at those local
 copies, ready to be opened by `load_raster` / `load_vector` /
 `load_xarray`.
 
-Three pieces live here:
+Current scaffolding (this PR):
 
-* `LocalCache` — fsspec-backed cache, keyed by ``(uri, asset)``.
-* `stage` — orchestrator: walks a catalog, fans out asset downloads
-  in parallel, returns a new catalog whose rows point at the cache.
-* GEE-specific materialization (``staging/gee.py``) for the
-  ``ee.Image.getDownloadURL`` path.
+* `LocalCache` — config carrier (root, ttl). Body is a plain
+  dataclass; the documented default-root resolution lands in
+  Phase 5.
+* `stage` — orchestrator entry point. Raises `NotImplementedError`
+  until Phase 5.
 
-Scaffolding only — Phase 5 in the design's phasing.
+Planned modules (Phase 5, see ``docs/design/query-matchup.md`` §4.7):
+
+* `staging/cache.py` — fsspec-backed cache, keyed by ``(uri, asset)``.
+* `staging/download.py` — parallel fetch + retry / backoff (shared
+  with the raster loaders' machinery from PR #51).
+* `staging/gee.py` — `ee.Image.getDownloadURL` materialization.
 """
 
 from __future__ import annotations

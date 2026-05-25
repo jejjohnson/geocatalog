@@ -26,20 +26,24 @@ if TYPE_CHECKING:
 class LocalCache:
     """fsspec-backed cache keyed by ``(uri, asset)``.
 
+    Scaffolding stage: the constructor stores the values as-is.
+    Phase 5 wires up the documented default-root resolution
+    (``$GEOCATALOG_CACHE`` → ``~/.cache/geocatalog/``); until then,
+    ``root`` stays whatever the caller passes (``None`` if omitted)
+    and `stage()` is the gate that fails fast on the unimplemented
+    backend.
+
     Args:
-        root: Directory the cache lives under. Defaults to
-            ``$GEOCATALOG_CACHE`` or ``~/.cache/geocatalog/``.
+        root: Directory the cache lives under. ``None`` in the
+            scaffolding phase; Phase 5 will resolve a default of
+            ``$GEOCATALOG_CACHE`` or ``~/.cache/geocatalog/`` when
+            not supplied.
         ttl_days: Optional lifetime; cache entries older than this
             are refetched. ``None`` means cache forever.
     """
 
     root: PathLike[str] | str | None = None
     ttl_days: int | None = None
-
-    def __post_init__(self) -> None:
-        # Resolution of the default ``root`` happens lazily so the
-        # constructor stays import-cheap.
-        ...
 
 
 def stage(

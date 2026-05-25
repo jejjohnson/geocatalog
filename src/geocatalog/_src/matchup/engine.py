@@ -56,6 +56,10 @@ class MatchupRow:
             member's interval midpoint relative to ``time_reference``.
         tolerance: Serialized strategy parameters, suitable for
             re-running the matchup deterministically.
+        query_set: Optional user label, persisted as the
+            ``query_set`` column in ``matchups.parquet`` so
+            ``geocatalog stage --matchup-tag <name>`` can select a
+            named set. Mirrors the ``tag`` argument of `matchup()`.
     """
 
     matchup_id: str
@@ -67,6 +71,7 @@ class MatchupRow:
     time_reference: datetime
     time_offset_sec: tuple[float, ...]
     tolerance: Mapping[str, Any] = dataclasses.field(default_factory=dict)
+    query_set: str | None = None
 
 
 def matchup(
