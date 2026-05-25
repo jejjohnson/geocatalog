@@ -217,7 +217,11 @@ def test_duckdb_open_retries_read_parquet_sql(
     con = FakeConnection()
     monkeypatch.setattr(duckdb_module, "_require_duckdb", lambda: FakeDuckDB(con))
     monkeypatch.setattr(duckdb_module, "_ensure_spatial", lambda con: None)
-    monkeypatch.setattr(duckdb_module, "_check_schema_version", lambda con, src: None)
+    monkeypatch.setattr(
+        duckdb_module,
+        "_check_schema_version",
+        lambda con, src, *, partitioned=False: None,
+    )
 
     catalog = duckdb_module.DuckDBGeoCatalog.open(
         "s3://bucket/catalog.parquet",

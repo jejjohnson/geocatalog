@@ -21,6 +21,7 @@ from geocatalog._src.raster import (
     load_raster,
     load_raster_timeseries,
 )
+from geocatalog._src.streaming import append_files
 
 
 if TYPE_CHECKING:
@@ -43,6 +44,7 @@ __all__ = [
     "DuckDBGeoCatalog",
     "GeoCatalog",
     "InMemoryGeoCatalog",
+    "append_files",
     "build_raster_catalog",
     "build_vector_catalog",
     "build_xarray_catalog",

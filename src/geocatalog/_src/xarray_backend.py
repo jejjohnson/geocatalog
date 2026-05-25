@@ -150,6 +150,7 @@ def build_xarray_catalog(
     out_path: str | Path | None = None,
     write_bbox: bool = True,
     sort_by: tuple[str, ...] | None = ("start_time", "geometry_hilbert"),
+    partition_by: tuple[str, ...] | None = None,
     batch_size: int = 10_000,
     n_workers: int = 1,
     ordered: bool = False,
@@ -196,6 +197,9 @@ def build_xarray_catalog(
             ``"geometry_hilbert"`` expands to
             ``ST_Hilbert(ST_Centroid(geometry))``. ``None`` skips the
             rewrite. Only consulted when ``backend="duckdb"``.
+        partition_by: Optional Hive partition columns for directory
+            output when ``backend="duckdb"``. ``"year"``, ``"month"``,
+            and ``"day"`` are derived from ``start_time``.
         batch_size: Rows per Arrow record batch. Default 10 000.
         n_workers: Process-pool size for per-file extraction.
         ordered: With ``backend="duckdb"`` and ``n_workers>1``, preserve
@@ -232,6 +236,7 @@ def build_xarray_catalog(
             out_path=out_path,
             write_bbox=write_bbox,
             sort_by=sort_by,
+            partition_by=partition_by,
             batch_size=batch_size,
             n_workers=n_workers,
             ordered=ordered,
@@ -270,6 +275,7 @@ def _build_xarray_catalog_duckdb(
     out_path: str | Path,
     write_bbox: bool,
     sort_by: tuple[str, ...] | None,
+    partition_by: tuple[str, ...] | None,
     batch_size: int,
     n_workers: int,
     ordered: bool,
@@ -310,6 +316,7 @@ def _build_xarray_catalog_duckdb(
         backend="xarray",
         write_bbox=write_bbox,
         sort_by=sort_by,
+        partition_by=partition_by,
         batch_size=batch_size,
         n_workers=n_workers,
         ordered=ordered,

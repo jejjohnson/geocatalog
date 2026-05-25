@@ -48,10 +48,12 @@ def fake_duckdb(monkeypatch: pytest.MonkeyPatch) -> _FakeConnection:
     monkeypatch.setattr(
         duckdb_backend,
         "_read_backend_tag",
-        lambda con, source, *, default: default,
+        lambda con, source, *, default, partitioned=False: default,
     )
     monkeypatch.setattr(
-        duckdb_backend, "_check_schema_version", lambda con, source: None
+        duckdb_backend,
+        "_check_schema_version",
+        lambda con, source, *, partitioned=False: None,
     )
     return con
 
@@ -84,7 +86,7 @@ def test_open_does_not_install_extensions_for_colon_local_paths(
     """`s3:catalog.parquet` is a local path, not a URI — no httpfs install."""
     cat = DuckDBGeoCatalog.open("s3:catalog.parquet")
     assert isinstance(cat, DuckDBGeoCatalog)
-    assert fake_duckdb.commands == ["INSTALL spatial", "LOAD spatial"]
+    assert fake_duckdb.commands == ["LOAD spatial"]
 
 
 def test_open_warns_when_uri_source_and_no_crs(
@@ -138,7 +140,7 @@ def test_open_loads_extension_for_supported_uri_schemes(
     captured_source: list[str] = []
 
     def fake_sql(query: str, *, params: dict[str, Any]) -> _FakeRelation:
-        assert query == "SELECT * FROM read_parquet($src)"
+        assert query == "SELECT * FROM read_parquet($src, hive_partitioning = $hive)"
         captured_source.append(params["src"])
         return _FakeRelation()
 
@@ -148,7 +150,6 @@ def test_open_loads_extension_for_supported_uri_schemes(
 
     assert isinstance(cat, DuckDBGeoCatalog)
     assert fake_duckdb.commands == [
-        "INSTALL spatial",
         "LOAD spatial",
         *extension_commands,
     ]

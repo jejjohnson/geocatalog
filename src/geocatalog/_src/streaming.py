@@ -30,11 +30,15 @@ import itertools
 import json
 import multiprocessing
 import os
+import shutil
 import tempfile
+import uuid
+from collections import OrderedDict
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pyproj
@@ -53,6 +57,16 @@ from geocatalog._src.parquet import SCHEMA_VERSION_CURRENT as _SCHEMA_VERSION
 
 _BACKEND_T = Literal["raster", "xarray", "vector"]
 _GEOPARQUET_VERSION = "1.1.0"
+
+
+# Default cap on concurrently-open shard writers in
+# `_write_partitioned_rows`. One file descriptor per open writer; with
+# high-cardinality `partition_by` (say, ``("year","month","day")`` across
+# a decade of daily data), the unbounded version would burn through the
+# default ``ulimit -n`` of 1024 deterministically. 64 keeps headroom for
+# the rest of the process (DuckDB pages, log files, etc.) while still
+# amortising the per-shard open overhead.
+_DEFAULT_MAX_OPEN_WRITERS: int = 64
 
 
 # ---------------------------------------------------------------------------
@@ -551,9 +565,11 @@ def stream_build_duckdb(
     backend: _BACKEND_T,
     write_bbox: bool = True,
     sort_by: tuple[str, ...] | None = ("start_time", "geometry_hilbert"),
+    partition_by: Sequence[str] | None = None,
     batch_size: int = 10_000,
     n_workers: int = 1,
     ordered: bool = False,
+    max_open_writers: int = _DEFAULT_MAX_OPEN_WRITERS,
 ) -> DuckDBGeoCatalog:
     """Stream-build a `DuckDBGeoCatalog` artifact from per-file extraction.
 
@@ -573,6 +589,11 @@ def stream_build_duckdb(
         write_bbox: Emit GeoParquet 1.1 ``bbox`` covering struct.
         sort_by: Sort keys for the post-write rewrite. ``None`` skips the
             rewrite and leaves rows in extraction order.
+        partition_by: Optional Hive partition columns for directory output.
+            Built-in ``"year"``, ``"month"``, and ``"day"`` values are
+            derived from ``start_time``; other names are read from each row.
+            Partitioned output skips the global sort rewrite because the
+            directory layout provides the coarse pruning axis.
         batch_size: Streaming batch size.
         n_workers: Process-pool size for extraction.
         ordered: With ``n_workers>1``, preserve input row order instead of
@@ -582,6 +603,9 @@ def stream_build_duckdb(
             (workers may sit idle waiting on the next-in-line future).
             Prefer ``ordered=False`` for skewed workloads and sort
             post-hoc if you need a stable byte layout.
+        max_open_writers: Cap on concurrently open shard writers when
+            ``partition_by`` is set. Ignored otherwise. See
+            `write_partitioned_rows` for the LRU eviction semantics.
 
     Returns:
         A `DuckDBGeoCatalog` opened on ``out_path``.
@@ -608,6 +632,27 @@ def stream_build_duckdb(
         raise FileNotFoundError(
             f"stream_build_duckdb: parent dir does not exist: {out_path.parent}"
         )
+
+    if partition_by is not None:
+        rows = _iter_rows_parallel(filepaths, extract_fn, n_workers=n_workers)
+        rows_written = _write_partitioned_rows(
+            rows,
+            out_path=out_path,
+            crs=crs,
+            backend=backend,
+            partition_by=partition_by,
+            write_bbox=write_bbox,
+            batch_size=batch_size,
+            replace=True,
+            max_open_writers=max_open_writers,
+        )
+        if rows_written == 0:
+            raise ValueError(
+                "stream_build_duckdb: no files yielded a row (every file "
+                "skipped or unmatched). Existing artifact at out_path "
+                "(if any) was not modified."
+            )
+        return DuckDBGeoCatalog.open(out_path, backend=backend, crs=crs)
 
     # Always stream into a sibling temp file, regardless of `sort_by`.
     # Only move/rename to `out_path` after we've confirmed at least one
@@ -687,3 +732,316 @@ def stream_build_duckdb(
         raise
 
     return DuckDBGeoCatalog.open(out_path, backend=backend, crs=crs)
+
+
+def append_files(
+    archive: str | Path,
+    filepaths: Sequence[str | Path],
+    extract_fn: Callable[[str | Path], dict[str, Any] | None],
+    *,
+    crs: Any,
+    backend: _BACKEND_T,
+    partition_by: Sequence[str],
+    write_bbox: bool = True,
+    batch_size: int = 10_000,
+    n_workers: int = 1,
+    max_open_writers: int = _DEFAULT_MAX_OPEN_WRITERS,
+) -> DuckDBGeoCatalog:
+    """Append new files to a Hive-partitioned GeoParquet archive.
+
+    Only the new rows are extracted and written; existing shards are left
+    untouched, so append work is ``O(N_new)`` plus the number of new
+    partitions touched. The archive is created if it does not exist.
+
+    Before any rows are written, the caller-supplied ``partition_by`` is
+    validated against the archive's existing layout (the directory tree
+    of ``key=value`` dirs). A mismatch raises `ValueError` rather than
+    silently producing a mixed-layout archive that downstream readers
+    can't reconstruct cleanly. A fresh archive (no existing shards)
+    accepts the caller's ``partition_by`` as the source of truth.
+
+    Args:
+        archive: Hive-partitioned GeoParquet directory.
+        filepaths: New source files to index.
+        extract_fn: Picklable per-file extractor, same contract as
+            `stream_build_duckdb`.
+        crs: CRS to encode in the new shard metadata.
+        backend: Backend tag for loader dispatch.
+        partition_by: Hive partition columns. ``"year"``, ``"month"``,
+            and ``"day"`` are derived from each row's ``start_time``.
+            Must match the existing archive's layout, if any.
+        write_bbox: Emit the GeoParquet 1.1 ``bbox`` covering struct.
+        batch_size: Rows per Arrow record batch.
+        n_workers: Process-pool size for extraction.
+        max_open_writers: Cap on concurrently open shard writers; see
+            `write_partitioned_rows`.
+
+    Returns:
+        A `DuckDBGeoCatalog` opened on the updated archive.
+
+    Raises:
+        ValueError: ``partition_by`` differs from the archive's existing
+            layout, or no input files yielded a row.
+    """
+    from geocatalog._src.duckdb_backend import DuckDBGeoCatalog, _require_duckdb
+
+    _require_duckdb()
+    archive = Path(archive)
+    if archive.exists() and not archive.is_dir():
+        raise ValueError(f"append_files requires a partitioned directory: {archive}")
+    if archive.parent != Path() and not archive.parent.exists():
+        raise FileNotFoundError(
+            f"append_files: parent dir does not exist: {archive.parent}"
+        )
+    requested = tuple(partition_by)
+    existing = _detect_partition_layout(archive)
+    if existing is not None and existing != requested:
+        raise ValueError(
+            f"append_files: partition_by={requested} does not match the "
+            f"archive's existing layout {existing} at {archive}. Mixed "
+            "Hive layouts produce shards that downstream readers cannot "
+            "join cleanly — rebuild the archive at the new layout, or "
+            "pass partition_by matching the existing one."
+        )
+    rows = _iter_rows_parallel(filepaths, extract_fn, n_workers=n_workers)
+    rows_written = _write_partitioned_rows(
+        rows,
+        out_path=archive,
+        crs=crs,
+        backend=backend,
+        partition_by=requested,
+        write_bbox=write_bbox,
+        batch_size=batch_size,
+        replace=False,
+        max_open_writers=max_open_writers,
+    )
+    if rows_written == 0:
+        raise ValueError("append_files: no files yielded a row")
+    return DuckDBGeoCatalog.open(archive, backend=backend, crs=crs)
+
+
+def _detect_partition_layout(archive: Path) -> tuple[str, ...] | None:
+    """Return the Hive partition column order under ``archive``, or None.
+
+    Walks the directory tree under ``archive`` looking for the first
+    ``.parquet`` shard, then walks back up reading the ``key=`` prefix
+    from each ancestor directory until it reaches ``archive``. The
+    returned tuple is the partition column order at write time.
+
+    Returns ``None`` if ``archive`` does not exist, contains no parquet
+    shards (fresh init), or contains parquet directly without any
+    ``key=value`` ancestors (a non-partitioned archive — treated as
+    "no layout to compare against" so the caller can still init).
+    """
+    if not archive.exists() or not archive.is_dir():
+        return None
+    shard = next(archive.rglob("*.parquet"), None)
+    if shard is None:
+        return None
+    keys: list[str] = []
+    current = shard.parent
+    while current != archive and current.parent != current:
+        name = current.name
+        if "=" not in name:
+            break
+        keys.append(name.split("=", 1)[0])
+        current = current.parent
+    if not keys:
+        return None
+    keys.reverse()
+    return tuple(keys)
+
+
+def write_partitioned_rows(
+    rows: Iterator[dict[str, Any]],
+    *,
+    out_path: str | Path,
+    crs: Any,
+    backend: _BACKEND_T,
+    partition_by: Sequence[str],
+    schema_version: int = _SCHEMA_VERSION,
+    write_bbox: bool = True,
+    batch_size: int = 10_000,
+    replace: bool = True,
+    max_open_writers: int = _DEFAULT_MAX_OPEN_WRITERS,
+) -> int:
+    """Write row dicts to a Hive-partitioned GeoParquet directory.
+
+    This is the lower-level writer used by `to_geoparquet(...,
+    partition_by=...)` and append workflows. Rows are streamed into one
+    shard per touched partition; ``replace=False`` moves only those new
+    shards into an existing archive.
+
+    To bound file-descriptor usage with high-cardinality
+    ``partition_by``, the writer keeps at most ``max_open_writers``
+    `StreamingParquetWriter` instances open at any time and evicts the
+    least-recently-used one when the cap is hit. If a previously-evicted
+    partition receives more rows, a *new* shard file is opened for it
+    (with a fresh shard ID) so we never truncate a finalised shard;
+    Hive readers union all shards under a partition directory, so this
+    is observationally identical to a single-shard partition.
+
+    Args:
+        rows: Iterator of catalog row dictionaries with shapely geometry.
+        out_path: Destination partitioned directory.
+        crs: CRS to encode in each shard's GeoParquet metadata.
+        backend: Backend tag for loader dispatch.
+        partition_by: Hive partition columns. ``"year"``, ``"month"``,
+            and ``"day"`` are derived from each row's ``start_time``.
+        schema_version: Reserved catalog schema version written per row.
+        write_bbox: Emit the GeoParquet 1.1 ``bbox`` covering struct.
+        batch_size: Rows per Arrow record batch.
+        replace: Replace the whole output directory when True; append only
+            the new shards when False.
+        max_open_writers: Hard cap on concurrently open shard writers.
+            Default 64 — enough headroom under a typical 1024 fd
+            ulimit while still amortising open overhead. Set higher on
+            generous-ulimit machines for fewer shard files per
+            partition.
+
+    Returns:
+        Number of rows written.
+    """
+    return _write_partitioned_rows(
+        rows,
+        out_path=out_path,
+        crs=crs,
+        backend=backend,
+        partition_by=partition_by,
+        schema_version=schema_version,
+        write_bbox=write_bbox,
+        batch_size=batch_size,
+        replace=replace,
+        max_open_writers=max_open_writers,
+    )
+
+
+def _write_partitioned_rows(
+    rows: Iterator[dict[str, Any]],
+    *,
+    out_path: str | Path,
+    crs: Any,
+    backend: _BACKEND_T,
+    partition_by: Sequence[str],
+    schema_version: int = _SCHEMA_VERSION,
+    write_bbox: bool = True,
+    batch_size: int = 10_000,
+    replace: bool,
+    max_open_writers: int = _DEFAULT_MAX_OPEN_WRITERS,
+) -> int:
+    partitions = tuple(partition_by)
+    if not partitions:
+        raise ValueError("partition_by must contain at least one column")
+    if max_open_writers < 1:
+        raise ValueError(f"max_open_writers must be >= 1; got {max_open_writers}")
+    partition_set = set(partitions)
+
+    out_path = Path(out_path)
+    target_dir = out_path.parent
+    staging = Path(
+        tempfile.mkdtemp(
+            prefix=out_path.name + ".partitioned.",
+            dir=str(target_dir),
+        )
+    )
+    # Open writers tracked LRU-style: insertion order = oldest-first, and
+    # `move_to_end` on access promotes the touched key to most-recent.
+    open_writers: OrderedDict[tuple[str, ...], StreamingParquetWriter] = OrderedDict()
+    rows_written = 0
+    write_session_id = uuid.uuid4().hex
+    partition_counter = itertools.count()
+
+    def _new_shard(values: tuple[str, ...]) -> StreamingParquetWriter:
+        partition_dir = staging.joinpath(
+            *(
+                f"{name}={_format_partition_value(value)}"
+                for name, value in zip(partitions, values, strict=True)
+            )
+        )
+        partition_dir.mkdir(parents=True, exist_ok=True)
+        partition_shard_id = f"{write_session_id}-{next(partition_counter):08d}"
+        shard = partition_dir / f"part-{partition_shard_id}.parquet"
+        return StreamingParquetWriter(
+            shard,
+            crs=crs,
+            backend=backend,
+            schema_version=schema_version,
+            write_bbox=write_bbox,
+            batch_size=batch_size,
+        )
+
+    try:
+        for row in rows:
+            values = tuple(_partition_value(row, name) for name in partitions)
+            writer = open_writers.get(values)
+            if writer is None:
+                # Evict the LRU writer if we're at the cap. A re-opened
+                # partition gets a *fresh* shard ID so we never write
+                # to a finalised file.
+                while len(open_writers) >= max_open_writers:
+                    _, evicted = open_writers.popitem(last=False)
+                    evicted.close()
+                writer = _new_shard(values)
+                open_writers[values] = writer
+            else:
+                open_writers.move_to_end(values)
+            writer.write_row({k: v for k, v in row.items() if k not in partition_set})
+            rows_written += 1
+    except BaseException:
+        for writer in open_writers.values():
+            writer.close()
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    for writer in open_writers.values():
+        writer.close()
+
+    if rows_written == 0:
+        shutil.rmtree(staging, ignore_errors=True)
+        return 0
+
+    if replace:
+        if out_path.exists():
+            if not out_path.is_dir():
+                out_path.unlink()
+            else:
+                shutil.rmtree(out_path)
+        os.replace(staging, out_path)
+        return rows_written
+
+    out_path.mkdir(parents=True, exist_ok=True)
+    for shard in staging.rglob("*.parquet"):
+        rel = shard.relative_to(staging)
+        dest = out_path / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(shard, dest)
+    shutil.rmtree(staging, ignore_errors=True)
+    return rows_written
+
+
+def _partition_value(row: dict[str, Any], name: str) -> Any:
+    if name in row and row[name] is not None:
+        return row[name]
+    if name in {"year", "month", "day"}:
+        if "start_time" not in row or row["start_time"] is None:
+            raise ValueError(
+                f"partition column {name!r} requires a 'start_time' field on "
+                "every row (derived via pd.Timestamp). Set start_time in the "
+                "extractor, or remove year/month/day from partition_by."
+            )
+        ts = pd.Timestamp(row["start_time"])
+        if pd.isna(ts):
+            # Silently producing "year=nan/month=nan/" shards corrupts the
+            # archive layout — downstream readers can't tell those rows
+            # apart from a string-valued "nan" partition.
+            raise ValueError(
+                f"partition column {name!r} cannot be derived from a NaT "
+                "start_time. Filter out time-less rows upstream or supply "
+                "explicit partition values on those rows."
+            )
+        return getattr(ts, name)
+    raise KeyError(f"partition column {name!r} not present in row")
+
+
+def _format_partition_value(value: Any) -> str:
+    text = str(value)
+    return text.replace("/", "_").replace("\\", "_").replace("=", "_")

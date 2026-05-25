@@ -282,6 +282,45 @@ def test_info_json(
     assert "geometry" in payload
 
 
+def test_convert_partition_by_default_out(
+    tmp_path: Path,
+    utm29_tile_factory: Callable[..., Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """convert single.parquet --partition-by year,month writes a Hive dir."""
+    source = _build_one_row(tmp_path, utm29_tile_factory)
+    capsys.readouterr()
+
+    exit_code = _run("convert", str(source), "--partition-by", "year,month")
+
+    assert exit_code == 0
+    out = source.with_suffix("")
+    assert out.is_dir()
+    assert (out / "year=2024" / "month=6").is_dir()
+
+
+def test_convert_refuses_in_place_destination(
+    tmp_path: Path,
+    utm29_tile_factory: Callable[..., Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """convert refuses to overwrite the source in place when no --out is given."""
+    source = _build_one_row(tmp_path, utm29_tile_factory)
+    # Move the source to an extensionless path so source.with_suffix("")
+    # would resolve to the source itself.
+    in_place = tmp_path / "in_place_catalog"
+    source.rename(in_place)
+    capsys.readouterr()
+
+    exit_code = _run("convert", str(in_place), "--partition-by", "year,month")
+
+    assert exit_code == 1
+    err = capsys.readouterr().err
+    assert "refusing to overwrite source" in err
+    # And the original file is untouched.
+    assert in_place.is_file()
+
+
 def test_query_rejects_half_window(
     tmp_path: Path,
     utm29_tile_factory: Callable[..., Path],

@@ -134,6 +134,7 @@ def to_geoparquet(
     *,
     schema_version: int = SCHEMA_VERSION_CURRENT,
     write_covering_bbox: bool = True,
+    partition_by: tuple[str, ...] | None = None,
 ) -> None:
     """Persist ``catalog`` as a GeoParquet file on disk.
 
@@ -166,12 +167,42 @@ def to_geoparquet(
             that GeoParquet 1.1 readers (DuckDB, geopandas ≥0.14) use
             for predicate pushdown. Default True; turn off only if a
             downstream consumer chokes on 1.1.
+        partition_by: Optional Hive partition columns for directory
+            output. Built-in ``"year"``, ``"month"``, and ``"day"`` are
+            derived from ``start_time``. Rows are streamed via
+            `gdf.itertuples` (much faster than `iterrows` on large
+            catalogs) and routed through `write_partitioned_rows`.
     """
     gdf = catalog.gdf.copy()
     if isinstance(gdf.index, pd.IntervalIndex):
         gdf["start_time"] = gdf.index.left
         gdf["end_time"] = gdf.index.right
         gdf = gdf.reset_index(drop=True)
+    if partition_by is not None:
+        from geocatalog._src.streaming import write_partitioned_rows
+
+        # `itertuples(index=False)` is ~10-50x faster than `iterrows()` on
+        # wide catalogs (`iterrows` materialises a `pd.Series` per row).
+        # Access columns by positional index — attribute access via
+        # `row.<colname>` chokes on names like ``eo:cloud_cover`` that
+        # aren't valid Python identifiers (pandas would silently rename
+        # them to ``_0``/etc.).
+        columns = list(gdf.columns)
+        rows = (
+            dict(zip(columns, tup, strict=True))
+            for tup in gdf.itertuples(index=False, name=None)
+        )
+        write_partitioned_rows(
+            rows,
+            out_path=path,
+            crs=gdf.crs,
+            backend=catalog.backend,
+            partition_by=partition_by,
+            schema_version=schema_version,
+            write_bbox=write_covering_bbox,
+            replace=True,
+        )
+        return
     gdf["_backend"] = catalog.backend
     gdf["_schema_version"] = schema_version
     gdf.to_parquet(
