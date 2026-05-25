@@ -834,7 +834,7 @@ def _read_backend_tag(
     don't break the lookup, and narrowed exception handling so genuine
     SQL parse errors aren't silently swallowed as a missing column.
     """
-    source_cache = _BACKEND_TAG_CACHE.get(con)
+    source_cache = _lookup_backend_cache(con)
     if source_cache is not None:
         cached = source_cache.get(source)
         if cached is not None:
@@ -866,13 +866,34 @@ def _read_backend_tag(
     return default
 
 
+def _lookup_backend_cache(
+    con: duckdb_mod.DuckDBPyConnection,
+) -> dict[str, _BACKEND_T] | None:
+    """`WeakKeyDictionary` lookup with a non-weakref-able-key fallback.
+
+    The repo dep is `duckdb>=1.1`, and `DuckDBPyConnection` only gained
+    weakref support in newer releases — on older DuckDBs both `.get(con)`
+    and `cache[con] = ...` raise `TypeError`. Treat that as a cache miss
+    so behaviour stays correct; only the per-source memoisation is lost.
+    """
+    try:
+        return _BACKEND_TAG_CACHE.get(con)
+    except TypeError:
+        return None
+
+
 def _cache_backend_tag(
     con: duckdb_mod.DuckDBPyConnection, source: str, tag: _BACKEND_T
 ) -> None:
-    source_cache = _BACKEND_TAG_CACHE.get(con)
+    source_cache = _lookup_backend_cache(con)
     if source_cache is None:
         source_cache = {}
-        _BACKEND_TAG_CACHE[con] = source_cache
+        # See `_lookup_backend_cache` — older DuckDB versions reject
+        # weakref keys; skip caching for those connections.
+        try:
+            _BACKEND_TAG_CACHE[con] = source_cache
+        except TypeError:
+            return
     source_cache[source] = tag
 
 

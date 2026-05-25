@@ -459,6 +459,47 @@ class TestCaching:
         assert con.calls == 2
         assert other_con.calls == 1
 
+    def test_backend_tag_read_falls_back_when_connection_not_weakrefable(
+        self,
+    ) -> None:
+        """Older DuckDB releases (>=1.1, <1.5) ship a `DuckDBPyConnection`
+        without weakref support. Adding such a connection as a
+        `WeakKeyDictionary` key raises `TypeError`; the helper must
+        degrade to no-cache rather than propagate the error."""
+
+        class _NoWeakRefConnection:
+            __slots__ = ("backend", "calls")
+
+            def __init__(self) -> None:
+                self.backend = "vector"
+                self.calls = 0
+
+            def sql(self, _query: str, **_kwargs: object) -> _AggregateResult:
+                self.calls += 1
+                return _AggregateResult(pd.DataFrame({"_backend": [self.backend]}))
+
+        con = _NoWeakRefConnection()
+        duckdb_backend._BACKEND_TAG_CACHE.clear()
+
+        # Sanity: this connection genuinely can't be weakref'd.
+        import weakref
+
+        with pytest.raises(TypeError):
+            weakref.ref(con)
+
+        first = duckdb_backend._read_backend_tag(
+            con, "catalog.parquet", default="raster"
+        )
+        second = duckdb_backend._read_backend_tag(
+            con, "catalog.parquet", default="raster"
+        )
+
+        # Correct value on both calls…
+        assert first == "vector"
+        assert second == "vector"
+        # …but cache was skipped, so every call re-queried.
+        assert con.calls == 2
+
 
 class TestSqlEscape:
     def test_sql_filter(self, parquet_two_tiles: Path) -> None:
