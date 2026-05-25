@@ -213,13 +213,21 @@ class DuckDBGeoCatalog:
         self._owner: DuckDBGeoCatalog | None = None
 
     def _require_open_con(self) -> duckdb_mod.DuckDBPyConnection:
+        # Derived catalogs share the owner's connection — if the owner
+        # was closed, our `self.con` still points at the (now-closed)
+        # DuckDBPyConnection object, so check the owner first.
+        if self._owner is not None and self._owner.con is None:
+            dd = _require_duckdb()
+            raise dd.ConnectionException(
+                "DuckDBGeoCatalog connection has already been closed. Open a new "
+                "catalog, or keep the parent catalog open when using derived catalogs."
+            )
         con = self.con
         if con is None:
             dd = _require_duckdb()
             raise dd.ConnectionException(
-                "Cannot perform operation: DuckDBGeoCatalog connection has been "
-                "closed. Open a new catalog, or keep the parent catalog open when "
-                "using derived catalogs."
+                "DuckDBGeoCatalog connection has already been closed. Open a new "
+                "catalog, or keep the parent catalog open when using derived catalogs."
             )
         return con
 
@@ -715,7 +723,7 @@ class DuckDBGeoCatalog:
 
     # ── properties + persistence ─────────────────────────────────────────
 
-    @cached_property
+    @property
     def total_bounds(self) -> tuple[float, float, float, float]:
         """Union bbox over the relation — one SQL aggregate, not a scan.
 
@@ -724,6 +732,10 @@ class DuckDBGeoCatalog:
             NaNs for an empty catalog.
         """
         self._require_open_con()
+        return self._total_bounds_cached
+
+    @cached_property
+    def _total_bounds_cached(self) -> tuple[float, float, float, float]:
         df = self.relation.aggregate(
             "MIN(ST_XMin(geometry)) AS xmin, "
             "MIN(ST_YMin(geometry)) AS ymin, "
@@ -739,7 +751,7 @@ class DuckDBGeoCatalog:
             float(df["ymax"].iloc[0]),
         )
 
-    @cached_property
+    @property
     def temporal_extent(self) -> pd.Interval:
         """Tightest interval over the relation — one SQL aggregate.
 
@@ -748,6 +760,10 @@ class DuckDBGeoCatalog:
             Both endpoints are ``pd.NaT`` for an empty catalog.
         """
         self._require_open_con()
+        return self._temporal_extent_cached
+
+    @cached_property
+    def _temporal_extent_cached(self) -> pd.Interval:
         df = self.relation.aggregate(
             "MIN(start_time) AS tmin, MAX(end_time) AS tmax"
         ).df()
@@ -816,6 +832,7 @@ class DuckDBGeoCatalog:
 
     def __len__(self) -> int:
         """Number of rows — cached after one COUNT(*) query."""
+        self._require_open_con()
         return self._row_count
 
     def __repr__(self) -> str:
