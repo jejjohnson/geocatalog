@@ -228,3 +228,107 @@ def test_duckdb_open_retries_read_parquet_sql(
 
     assert catalog.relation is relation
     assert con.attempts == 3
+
+
+# ---------------------------------------------------------------------------
+# Direct unit tests of `retry_transient_io` — exception filtering, validation,
+# and the success-fast path.
+# ---------------------------------------------------------------------------
+
+
+def test_retry_rejects_negative_retries() -> None:
+    with pytest.raises(ValueError, match="retries must be >= 0"):
+        retry_module.retry_transient_io(lambda: None, retries=-1)
+
+
+def test_retry_success_first_try() -> None:
+    calls = 0
+
+    def ok() -> str:
+        nonlocal calls
+        calls += 1
+        return "ok"
+
+    assert retry_module.retry_transient_io(ok, retries=3) == "ok"
+    assert calls == 1
+
+
+def test_retry_does_not_retry_file_not_found() -> None:
+    attempts = 0
+
+    def missing() -> None:
+        nonlocal attempts
+        attempts += 1
+        raise FileNotFoundError("nope")
+
+    with pytest.raises(FileNotFoundError):
+        retry_module.retry_transient_io(missing, retries=5)
+
+    # Fatal OSError subclasses should not be retried — paying 6x wall time
+    # for a path that will never exist is a foot-gun.
+    assert attempts == 1
+
+
+@pytest.mark.parametrize(
+    "exc_type",
+    [PermissionError, IsADirectoryError, NotADirectoryError, InterruptedError],
+)
+def test_retry_does_not_retry_other_fatal_oserrors(
+    exc_type: type[OSError],
+) -> None:
+    attempts = 0
+
+    def fail() -> None:
+        nonlocal attempts
+        attempts += 1
+        raise exc_type("nope")
+
+    with pytest.raises(exc_type):
+        retry_module.retry_transient_io(fail, retries=5)
+
+    assert attempts == 1
+
+
+def test_retry_handles_rasterio_io_error() -> None:
+    from rasterio.errors import RasterioIOError
+
+    attempts = 0
+
+    def flaky() -> str:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise RasterioIOError("HTTP 503")
+        return "ok"
+
+    assert retry_module.retry_transient_io(flaky, retries=3) == "ok"
+    assert attempts == 3
+
+
+def test_retry_handles_urllib3_read_timeout() -> None:
+    urllib3_exc = pytest.importorskip("urllib3.exceptions")
+    attempts = 0
+
+    def flaky() -> str:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 2:
+            raise urllib3_exc.ReadTimeoutError(None, "url", "timed out")
+        return "ok"
+
+    assert retry_module.retry_transient_io(flaky, retries=2) == "ok"
+    assert attempts == 2
+
+
+def test_retry_does_not_swallow_non_io_exception() -> None:
+    attempts = 0
+
+    def boom() -> None:
+        nonlocal attempts
+        attempts += 1
+        raise ValueError("not an IO error")
+
+    with pytest.raises(ValueError, match="not an IO error"):
+        retry_module.retry_transient_io(boom, retries=5)
+
+    assert attempts == 1
