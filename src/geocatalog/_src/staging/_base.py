@@ -166,6 +166,8 @@ def stage(
         )
     if on_error not in {"raise", "skip"}:
         raise ValueError(f"on_error must be 'raise' or 'skip'; got {on_error!r}")
+    if retries < 0:
+        raise ValueError(f"retries must be >= 0; got {retries!r}")
 
     cache = cache or LocalCache(root=dest)
 
@@ -185,7 +187,9 @@ def stage(
 
     # Fetch in parallel. Each future returns (row_idx, key, local_path
     # or Exception); the main thread sorts results back into the plans.
-    failures: dict[tuple[int, str], BaseException] = {}
+    # Catch `Exception` (not `BaseException`) so KeyboardInterrupt /
+    # SystemExit still stop staging immediately.
+    failures: dict[tuple[int, str], Exception] = {}
     with ThreadPoolExecutor(max_workers=max(1, parallel)) as pool:
         futures = {
             pool.submit(_fetch_one, uri, cache, retries): (row_idx, key, uri)
@@ -195,7 +199,7 @@ def stage(
             row_idx, key, uri = futures[fut]
             try:
                 local_path = fut.result()
-            except BaseException as exc:
+            except Exception as exc:
                 if on_error == "raise":
                     raise
                 logger.warning(
@@ -270,24 +274,39 @@ def _rewrite_gdf(
     src: gpd.GeoDataFrame,
     plans: list[_RowPlan],
     *,
-    failures: dict[tuple[int, str], BaseException],
+    failures: dict[tuple[int, str], Exception],
 ) -> gpd.GeoDataFrame:
-    """Build a new GeoDataFrame with rewritten filepath + asset map columns."""
+    """Build a new GeoDataFrame with rewritten filepath + asset map columns.
+
+    Under ``on_error="skip"``, failed assets keep their original URI
+    in the rewritten asset map (matching the documented contract).
+    ``failures`` is the set of ``(row_idx, key)`` pairs the executor
+    captured; anything else absent from ``plan.results`` is treated
+    as a fetch that simply wasn't attempted.
+    """
     new_filepaths: list[str] = []
     new_assets: list[str] = []
     staged_from: list[str] = []
 
     for plan in plans:
         if plan.has_asset_map:
-            # Pick a primary: the first asset to land in `results`,
-            # preserving the original dict's key order.
+            # Preserve the original dict's key order. For each asset:
+            #   - success → local path
+            #   - failure under on_error="skip" → original URI
+            #   - never attempted → omitted from the map
             local_map: dict[str, str] = {}
-            for key in plan.assets:
+            for key, uri in plan.assets.items():
                 local = plan.results.get(key)
                 if local is not None:
                     local_map[key] = local
-            primary_local = (
-                next(iter(local_map.values())) if local_map else plan.primary_uri
+                elif (plan.row_idx, key) in failures:
+                    local_map[key] = uri
+            # Prefer a real local path for the primary; fall back to
+            # the first surviving entry (which may itself be a URI
+            # under "skip"), then to the row's original primary.
+            primary_local = next(
+                (v for k, v in local_map.items() if k in plan.results),
+                next(iter(local_map.values()), plan.primary_uri),
             )
             new_filepaths.append(primary_local)
             new_assets.append(json.dumps(local_map))
@@ -334,7 +353,7 @@ def _fetch_one(uri: str, cache: LocalCache, retries: int) -> Path:
             return local
 
     dest.parent.mkdir(parents=True, exist_ok=True)
-    last_exc: BaseException | None = None
+    last_exc: Exception | None = None
     for attempt in range(retries + 1):
         try:
             with fsspec.open(uri, mode="rb") as src, dest.open("wb") as dst:

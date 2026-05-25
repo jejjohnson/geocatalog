@@ -452,11 +452,18 @@ class TestStageOnError:
         with pytest.raises(OSError, match="nope"):
             stage(cat, dest=tmp_path / "cache", retries=0)
 
-        # `on_error="skip"`: the row survives with only the good asset.
+        # `on_error="skip"`: the row survives — the good asset is
+        # rewritten to a local cache path, and the bad asset retains
+        # its original URI so downstream code can detect what was
+        # left unstaged.
         out = stage(cat, dest=tmp_path / "cache", retries=0, on_error="skip")
         assets_out = json.loads(out.gdf.iloc[0]["assets"])
         assert "good" in assets_out
-        assert "bad" not in assets_out
+        assert assets_out.get("bad") == bad
+        # The primary `filepath` should be a real local cache path
+        # (i.e. the successful "good" asset), not the unresolved URI.
+        assert out.gdf.iloc[0]["filepath"] != bad
+        assert out.gdf.iloc[0]["filepath"] == assets_out["good"]
 
     def test_invalid_on_error_rejected(self, tmp_path: Path) -> None:
         cat = _catalog(
@@ -477,3 +484,17 @@ class TestStageGuardrails:
     def test_non_inmemory_catalog_rejected(self, tmp_path: Path) -> None:
         with pytest.raises(TypeError, match="InMemoryGeoCatalog"):
             stage(object(), dest=tmp_path)  # type: ignore[arg-type]
+
+    def test_negative_retries_rejected(self, tmp_path: Path) -> None:
+        cat = _catalog(
+            rows=[
+                {
+                    "geometry": box(0, 0, 1, 1),
+                    "start_time": pd.Timestamp("2024-06-01"),
+                    "end_time": pd.Timestamp("2024-06-02"),
+                    "filepath": "/some/path",
+                }
+            ]
+        )
+        with pytest.raises(ValueError, match="retries"):
+            stage(cat, dest=tmp_path / "cache", retries=-1)
