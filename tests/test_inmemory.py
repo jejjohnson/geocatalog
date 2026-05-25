@@ -257,6 +257,31 @@ class TestIterRows:
         assert rows[0].extras == {"sensor": "S2A", "cloud_pct": 10}
         assert rows[1].extras == {"sensor": "S2B", "cloud_pct": 20}
 
+    def test_extras_preserve_pandas_scalar_types(self) -> None:
+        """Datetime extras must yield ``pd.Timestamp``, not ``np.datetime64``.
+
+        Regression: an earlier vectorised implementation used
+        ``Series.to_numpy(copy=False)`` for extras, which silently coerced
+        pandas extension scalars and made ``CatalogRow.extras`` diverge
+        from the DuckDB backend (which uses ``Series.iloc[i]``).
+        """
+        catalog = _build(
+            [
+                {
+                    "geometry": shapely.geometry.box(0, 0, 1, 1),
+                    "start_time": pd.Timestamp("2024-01-01"),
+                    "end_time": pd.Timestamp("2024-01-02"),
+                    "filepath": "tile_A.tif",
+                    "observed_at": pd.Timestamp("2024-01-01 12:00"),
+                },
+            ]
+        )
+
+        rows = list(catalog.iter_rows())
+
+        assert isinstance(rows[0].extras["observed_at"], pd.Timestamp)
+        assert rows[0].extras["observed_at"] == pd.Timestamp("2024-01-01 12:00")
+
     def test_uses_interval_as_filepath_fallback(self) -> None:
         gdf = gpd.GeoDataFrame(
             {
