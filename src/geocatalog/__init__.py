@@ -77,7 +77,7 @@ if TYPE_CHECKING:
     )
 
 
-__version__ = "0.0.1"
+__version__ = "0.0.2"
 
 __all__ = [
     "PIXEL_PRECISION",
