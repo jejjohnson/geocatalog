@@ -24,7 +24,7 @@ from geocatalog import (
 
 
 CLOSED_CONNECTION_MESSAGE = (
-    "Cannot perform operation: DuckDBGeoCatalog connection has been closed. "
+    "DuckDBGeoCatalog connection has already been closed. "
     "Open a new catalog, or keep the parent catalog open when using derived catalogs."
 )
 CLOSED_CONNECTION_MATCH = re.escape(CLOSED_CONNECTION_MESSAGE)
