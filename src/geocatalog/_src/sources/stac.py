@@ -176,7 +176,7 @@ class STACSource(Source):
             if filters:
                 search_kwargs["query"] = filters
 
-        logger.debug("STAC search on %s: %r", self.endpoint, search_kwargs)
+        logger.debug("STAC search on {}: {!r}", self.endpoint, search_kwargs)
         search = self.client.search(**search_kwargs)
         for item in search.items():
             if self.sign_assets:
@@ -235,6 +235,16 @@ def _interval_to_stac_datetime(interval: pd.Interval) -> str:
     return f"{_to_iso(start)}/{_to_iso(end)}"
 
 
+def _to_utc_timestamp(value: Any) -> pd.Timestamp:
+    """Coerce any datetime-like to a UTC-aware ``pd.Timestamp``.
+
+    Naive inputs are assumed UTC (the catalog's stored time-axis
+    contract). Tz-aware inputs in other zones are converted.
+    """
+    ts = pd.Timestamp(value)
+    return ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
+
+
 def _to_iso(ts: pd.Timestamp) -> str:
     """Naive timestamps are assumed UTC; everything serialized with ``Z``."""
     ts = ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
@@ -266,15 +276,21 @@ def _item_to_source_row(
 
     # Interval: STAC items either have a single `datetime` or a
     # `start_datetime`/`end_datetime` pair (the "datetime range"
-    # convention). Prefer the range when present.
+    # convention). Prefer the range when present. Every endpoint is
+    # normalized to UTC because:
+    #   - STAC items can carry any tz (or none) per the spec;
+    #   - pandas refuses to compare tz-aware against tz-naive
+    #     Timestamps, so a mixed-tz dataset would explode in
+    #     downstream IntervalIndex / merge_asof operations;
+    #   - the catalog's stored time-axis contract is UTC.
     props = dict(item.properties or {})
     start_dt = props.get("start_datetime")
     end_dt = props.get("end_datetime")
     if start_dt is not None and end_dt is not None:
-        left = pd.Timestamp(start_dt)
-        right = pd.Timestamp(end_dt)
+        left = _to_utc_timestamp(start_dt)
+        right = _to_utc_timestamp(end_dt)
     elif item.datetime is not None:
-        left = right = pd.Timestamp(item.datetime)
+        left = right = _to_utc_timestamp(item.datetime)
     else:
         raise ValueError(
             f"STAC item {item.id!r} has neither `datetime` nor "

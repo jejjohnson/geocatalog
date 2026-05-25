@@ -17,8 +17,16 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pandas as pd
-import pystac
 import pytest
+
+
+# The `[stac]` extra is optional; without it the whole STAC test
+# module skips cleanly rather than failing at collection. This is
+# the same pattern the rest of the suite uses for extras-gated tests
+# (DuckDB, xarray, etc).
+pystac = pytest.importorskip("pystac")
+pytest.importorskip("pystac_client")
+
 from shapely.geometry import box, mapping
 
 from geocatalog._src.sources._base import SourceRow
@@ -26,6 +34,7 @@ from geocatalog._src.sources.stac import (
     STACSource,
     _interval_to_stac_datetime,
     _item_to_source_row,
+    _to_utc_timestamp,
 )
 
 
@@ -195,6 +204,60 @@ class TestItemToSourceRow:
                 fetched_at=datetime(2026, 5, 25, tzinfo=UTC),
                 source_version="v",
             )
+
+    def test_datetime_range_normalized_to_utc(self) -> None:
+        # STAC items can carry any tz. Downstream pandas operations
+        # (IntervalIndex, merge_asof) refuse to compare tz-aware
+        # against naive Timestamps, so we coerce everything to UTC
+        # at the ingest boundary. A `-07:00` start should land at
+        # 15:00Z in the row's interval.
+        start = datetime(
+            2024,
+            6,
+            1,
+            8,
+            0,
+            tzinfo=__import__("datetime").timezone(
+                __import__("datetime").timedelta(hours=-7)
+            ),
+        )
+        end = datetime(
+            2024,
+            6,
+            1,
+            17,
+            0,
+            tzinfo=__import__("datetime").timezone(
+                __import__("datetime").timedelta(hours=-7)
+            ),
+        )
+        item = _make_item(
+            datetime_=None,
+            start_datetime=start,
+            end_datetime=end,
+        )
+        row = _item_to_source_row(
+            item,
+            source_name="stac.pc",
+            query_id="q",
+            fetched_at=datetime(2026, 5, 25, tzinfo=UTC),
+            source_version="v",
+        )
+        assert row.interval.left == pd.Timestamp("2024-06-01T15:00:00Z")
+        assert row.interval.right == pd.Timestamp("2024-06-02T00:00:00Z")
+        # Both endpoints are tz-aware UTC — guards against naive
+        # mixing in downstream IntervalIndex operations.
+        assert row.interval.left.tzinfo is not None
+        assert row.interval.right.tzinfo is not None
+
+    def test_to_utc_timestamp_naive_assumed_utc(self) -> None:
+        ts = _to_utc_timestamp("2024-06-15T10:00:00")
+        assert ts == pd.Timestamp("2024-06-15T10:00:00Z")
+        assert ts.tzinfo is not None
+
+    def test_to_utc_timestamp_tz_aware_converted(self) -> None:
+        ts = _to_utc_timestamp("2024-06-15T10:00:00-04:00")
+        assert ts == pd.Timestamp("2024-06-15T14:00:00Z")
 
     def test_empty_collection_id_handled(self) -> None:
         item = _make_item(datetime_=datetime(2024, 6, 15, tzinfo=UTC))
