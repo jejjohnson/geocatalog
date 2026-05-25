@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections import Counter
+
 import geopandas as gpd
 import numpy as np
 import pandas as pd
@@ -199,10 +201,42 @@ class TestSetAlgebra:
         legacy = two_tile_catalog.intersect(other, engine="overlay")
 
         assert len(default) == len(legacy)
-        assert {shapely.normalize(g).wkb_hex for g in default.gdf.geometry} == {
-            shapely.normalize(g).wkb_hex for g in legacy.gdf.geometry
-        }
-        assert set(default.gdf.index) == set(legacy.gdf.index)
+        # ``set`` would mask duplicate-row multiplicity; geometries aren't
+        # hashable so key by normalised WKB hex inside a ``Counter``.
+        assert Counter(
+            shapely.normalize(g).wkb_hex for g in default.gdf.geometry
+        ) == Counter(shapely.normalize(g).wkb_hex for g in legacy.gdf.geometry)
+        assert Counter(default.gdf.index) == Counter(legacy.gdf.index)
+
+    def test_intersect_sjoin_handles_invalid_geometry(self) -> None:
+        # Bowtie self-intersecting polygon — would crash GEOS without the
+        # ``make_valid`` repair mirrored from ``gpd.overlay``.
+        bowtie = shapely.geometry.Polygon([(0, 0), (10, 10), (10, 0), (0, 10), (0, 0)])
+        assert not bowtie.is_valid
+        left = _build(
+            [
+                {
+                    "geometry": bowtie,
+                    "start_time": pd.Timestamp("2024-01-01"),
+                    "end_time": pd.Timestamp("2024-01-02"),
+                    "filepath": "invalid.tif",
+                },
+            ]
+        )
+        right = _build(
+            [
+                {
+                    "geometry": shapely.geometry.box(0, 0, 10, 10),
+                    "start_time": pd.Timestamp("2024-01-01"),
+                    "end_time": pd.Timestamp("2024-01-02"),
+                    "filepath": "labels.gpkg",
+                },
+            ]
+        )
+        joined = left.intersect(right)
+        assert len(joined) >= 1
+        assert not joined.gdf.geometry.is_empty.any()
+        assert joined.gdf.geometry.area.sum() > 0
 
     def test_intersect_drops_boundary_only_matches(self) -> None:
         left = _build(

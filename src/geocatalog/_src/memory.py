@@ -192,11 +192,13 @@ class InMemoryGeoCatalog:
                 right_geometry = right.geometry.iloc[joined["index_right"]].reset_index(
                     drop=True
                 )
+                # Mirror gpd.overlay's default ``make_valid=True``: GEOS will
+                # raise on self-intersecting inputs to ``shapely.intersection``.
+                # Pay the repair cost only on rows actually flagged invalid.
+                left_array = _repair_invalid(left_geometry.to_numpy())
+                right_array = _repair_invalid(right_geometry.to_numpy())
                 clipped = gpd.GeoSeries(
-                    shapely.intersection(
-                        left_geometry.to_numpy(),
-                        right_geometry.to_numpy(),
-                    ),
+                    shapely.intersection(left_array, right_array),
                     index=joined.index,
                     crs=self.gdf.crs,
                 )
@@ -377,6 +379,22 @@ def _empty_catalog(crs: Any, backend: _BACKEND_T) -> InMemoryGeoCatalog:
         ),
     )
     return InMemoryGeoCatalog(empty_gdf, backend=backend)
+
+
+def _repair_invalid(geometries: np.ndarray) -> np.ndarray:
+    """Apply ``shapely.make_valid`` only to invalid geometries.
+
+    ``gpd.overlay`` defaults to ``make_valid=True``; the sjoin path must
+    mirror that to avoid GEOS exceptions from ``shapely.intersection`` on
+    self-intersecting polygons. Vectorised ``shapely.is_valid`` keeps the
+    cost proportional to the number of actually-invalid rows.
+    """
+    invalid_mask = ~shapely.is_valid(geometries)
+    if not invalid_mask.any():
+        return geometries
+    repaired = geometries.copy()
+    repaired[invalid_mask] = shapely.make_valid(geometries[invalid_mask])
+    return repaired
 
 
 def _keep_geom_type_mask(
