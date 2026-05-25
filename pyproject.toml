@@ -65,11 +65,29 @@ xarray-raster = ["rioxarray>=0.15", "xarray>=2024.1"]
 duckdb = ["duckdb>=1.1"]
 # Streaming writer for incremental GeoParquet builds.
 streaming = ["zarr>=3.0"]
+# External data-source adapters. Each gated independently so a user
+# who only needs STAC doesn't get earthaccess. See
+# `docs/design/query-matchup.md` §4.2 for the full design.
+earthaccess = ["earthaccess>=0.10"]
+stac = ["pystac-client>=0.7", "planetary-computer>=1.0"]
+gee = ["earthengine-api>=0.1.380"]
+sources-all = [
+    "earthaccess>=0.10",
+    "pystac-client>=0.7",
+    "planetary-computer>=1.0",
+    "earthengine-api>=0.1.380",
+]
 full = [
     "xarray>=2024.1",
     "rioxarray>=0.15",
     "zarr>=3.0",
     "duckdb>=1.1",
+    # Source-adapter extras roll into `full` so `pip install 'geocatalog[full]'`
+    # is the one-shot install path that lights up every public surface.
+    "earthaccess>=0.10",
+    "pystac-client>=0.7",
+    "planetary-computer>=1.0",
+    "earthengine-api>=0.1.380",
 ]
 
 [project.urls]
