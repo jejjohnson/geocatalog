@@ -19,12 +19,23 @@ import geopandas as gpd
 import numpy as np
 import pandas as pd
 import pyproj
+import shapely
 
 from geocatalog._src.base import CatalogRow
 from geocatalog._src.geoslice import GeoSlice
 
 
 _BACKEND_T = Literal["raster", "xarray", "vector"]
+_INTERSECT_ENGINE_T = Literal["sjoin", "overlay"]
+_GEOMETRY_TYPE_FAMILY = {
+    "Point": "Point",
+    "MultiPoint": "Point",
+    "LineString": "LineString",
+    "LinearRing": "LineString",
+    "MultiLineString": "LineString",
+    "Polygon": "Polygon",
+    "MultiPolygon": "Polygon",
+}
 
 
 class InMemoryGeoCatalog:
@@ -144,7 +155,11 @@ class InMemoryGeoCatalog:
         return InMemoryGeoCatalog(out, backend=self.backend)
 
     def intersect(
-        self, other: InMemoryGeoCatalog, *, spatial_only: bool = False
+        self,
+        other: InMemoryGeoCatalog,
+        *,
+        spatial_only: bool = False,
+        engine: _INTERSECT_ENGINE_T = "sjoin",
     ) -> InMemoryGeoCatalog:
         """Cross-catalog AND — rows whose footprints and times overlap.
 
@@ -154,32 +169,57 @@ class InMemoryGeoCatalog:
                 the same kind of file as ``self``).
             spatial_only: If True, ignore the temporal axis — useful for
                 pairing imagery with static labels.
+            engine: Spatial join engine. ``"sjoin"`` uses the GeoPandas
+                spatial index, while ``"overlay"`` preserves the legacy
+                overlay implementation.
         """
         if other.gdf.crs != self.gdf.crs:
             right_gdf = other.gdf.to_crs(self.gdf.crs)
         else:
             right_gdf = other.gdf
 
-        # Spatial intersect via gpd.overlay. Rename the right-side
-        # attribute columns up-front so they survive the overlay without
-        # collisions, *then* attach the interval columns under a sentinel
-        # name `gpd.overlay` won't touch.
         right_renamed = right_gdf.rename(
             columns={c: f"_right_{c}" for c in right_gdf.columns if c != "geometry"}
         )
         left = self.gdf.reset_index(names="_left_interval")
         right = right_renamed.reset_index(names="_right_interval")
-        overlay = gpd.overlay(left, right, how="intersection", keep_geom_type=True)
-        if overlay.empty:
+        if engine == "overlay":
+            joined = gpd.overlay(left, right, how="intersection", keep_geom_type=True)
+        elif engine == "sjoin":
+            joined = gpd.sjoin(left, right, how="inner", predicate="intersects")
+            if not joined.empty:
+                left_geometry = joined.geometry.reset_index(drop=True)
+                right_geometry = right.geometry.iloc[joined["index_right"]].reset_index(
+                    drop=True
+                )
+                # Mirror gpd.overlay's default ``make_valid=True``: GEOS will
+                # raise on self-intersecting inputs to ``shapely.intersection``.
+                # Pay the repair cost only on rows actually flagged invalid.
+                left_array = _repair_invalid(left_geometry.to_numpy())
+                right_array = _repair_invalid(right_geometry.to_numpy())
+                clipped = gpd.GeoSeries(
+                    shapely.intersection(left_array, right_array),
+                    index=joined.index,
+                    crs=self.gdf.crs,
+                )
+                keep_geom_mask = _keep_geom_type_mask(joined.geometry, clipped)
+                joined = joined.loc[keep_geom_mask].copy()
+                clipped = clipped.loc[keep_geom_mask]
+                joined = joined.set_geometry(clipped)
+                joined = joined.drop(columns=["index_right"], errors="ignore")
+        else:
+            raise ValueError(f"Unsupported intersect engine: {engine!r}")
+
+        if joined.empty:
             return _empty_catalog(self.gdf.crs, self.backend)
 
         if spatial_only:
-            mint = overlay["_left_interval"].apply(lambda i: i.left)
-            maxt = overlay["_left_interval"].apply(lambda i: i.right)
-            keep_mask = pd.Series(True, index=overlay.index)
+            mint = joined["_left_interval"].apply(lambda i: i.left)
+            maxt = joined["_left_interval"].apply(lambda i: i.right)
+            keep_mask = pd.Series(True, index=joined.index)
         else:
-            li = overlay["_left_interval"]
-            ri = overlay["_right_interval"]
+            li = joined["_left_interval"]
+            ri = joined["_right_interval"]
             mint = np.maximum(
                 li.apply(lambda i: i.left).to_numpy(),
                 ri.apply(lambda i: i.left).to_numpy(),
@@ -188,19 +228,19 @@ class InMemoryGeoCatalog:
                 li.apply(lambda i: i.right).to_numpy(),
                 ri.apply(lambda i: i.right).to_numpy(),
             )
-            keep_mask = pd.Series(maxt >= mint, index=overlay.index)
-            overlay = overlay[keep_mask]
+            keep_mask = pd.Series(maxt >= mint, index=joined.index)
+            joined = joined[keep_mask]
             mint = mint[keep_mask.to_numpy()]
             maxt = maxt[keep_mask.to_numpy()]
 
-        if overlay.empty:
+        if joined.empty:
             return _empty_catalog(self.gdf.crs, self.backend)
 
         idx = pd.IntervalIndex.from_arrays(mint, maxt, closed="both", name="datetime")
-        overlay = overlay.drop(
+        joined = joined.drop(
             columns=["_left_interval", "_right_interval"], errors="ignore"
         ).set_index(idx)
-        return InMemoryGeoCatalog(overlay, backend=self.backend)
+        return InMemoryGeoCatalog(joined, backend=self.backend)
 
     def union(self, other: InMemoryGeoCatalog) -> InMemoryGeoCatalog:
         """Cross-catalog OR — concatenate rows.
@@ -350,6 +390,39 @@ def _empty_catalog(crs: Any, backend: _BACKEND_T) -> InMemoryGeoCatalog:
         ),
     )
     return InMemoryGeoCatalog(empty_gdf, backend=backend)
+
+
+def _repair_invalid(geometries: np.ndarray) -> np.ndarray:
+    """Apply ``shapely.make_valid`` only to invalid geometries.
+
+    ``gpd.overlay`` defaults to ``make_valid=True``; the sjoin path must
+    mirror that to avoid GEOS exceptions from ``shapely.intersection`` on
+    self-intersecting polygons. Vectorised ``shapely.is_valid`` keeps the
+    cost proportional to the number of actually-invalid rows.
+    """
+    invalid_mask = ~shapely.is_valid(geometries)
+    if not invalid_mask.any():
+        return geometries
+    repaired = geometries.copy()
+    repaired[invalid_mask] = shapely.make_valid(geometries[invalid_mask])
+    return repaired
+
+
+def _keep_geom_type_mask(
+    left_geometry: gpd.GeoSeries, intersection_geometry: gpd.GeoSeries
+) -> pd.Series:
+    """Match `gpd.overlay(..., keep_geom_type=True)` after vectorized clipping.
+
+    Known single/multi geometry pairs share a family. Unknown geometry
+    types fall through unchanged and must match exactly.
+    """
+    left_family = left_geometry.geom_type.replace(_GEOMETRY_TYPE_FAMILY)
+    intersection_family = intersection_geometry.geom_type.replace(_GEOMETRY_TYPE_FAMILY)
+    return (
+        intersection_geometry.notna()
+        & ~intersection_geometry.is_empty
+        & (left_family == intersection_family)
+    )
 
 
 def _coerce_interval(time: tuple[Any, Any] | pd.Interval) -> pd.Interval:

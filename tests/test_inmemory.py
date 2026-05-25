@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from collections import Counter
+
 import geopandas as gpd
 import numpy as np
 import pandas as pd
 import pytest
+import shapely
 import shapely.geometry
 
 from geocatalog import GeoSlice, InMemoryGeoCatalog, intersect, query, union
@@ -180,6 +183,90 @@ class TestSetAlgebra:
         joint = intersect(two_tile_catalog, other, spatial_only=True)
         # Time mismatch ignored; both A and B clip against the labels footprint.
         assert len(joint) == 2
+
+    def test_intersect_overlay_engine_matches_sjoin(
+        self, two_tile_catalog: InMemoryGeoCatalog
+    ) -> None:
+        other = _build(
+            [
+                {
+                    "geometry": shapely.geometry.box(50, 50, 250, 150),
+                    "start_time": pd.Timestamp("2024-01-01"),
+                    "end_time": pd.Timestamp("2024-01-04"),
+                    "filepath": "labels.gpkg",
+                },
+            ]
+        )
+        default = two_tile_catalog.intersect(other)
+        legacy = two_tile_catalog.intersect(other, engine="overlay")
+
+        assert len(default) == len(legacy)
+        # ``set`` would mask duplicate-row multiplicity; geometries aren't
+        # hashable so key by normalised WKB hex inside a ``Counter``.
+        assert Counter(
+            shapely.normalize(g).wkb_hex for g in default.gdf.geometry
+        ) == Counter(shapely.normalize(g).wkb_hex for g in legacy.gdf.geometry)
+        assert Counter(default.gdf.index) == Counter(legacy.gdf.index)
+
+    def test_intersect_sjoin_handles_invalid_geometry(self) -> None:
+        # Bowtie self-intersecting polygon — would crash GEOS without the
+        # ``make_valid`` repair mirrored from ``gpd.overlay``.
+        bowtie = shapely.geometry.Polygon([(0, 0), (10, 10), (10, 0), (0, 10), (0, 0)])
+        assert not bowtie.is_valid
+        left = _build(
+            [
+                {
+                    "geometry": bowtie,
+                    "start_time": pd.Timestamp("2024-01-01"),
+                    "end_time": pd.Timestamp("2024-01-02"),
+                    "filepath": "invalid.tif",
+                },
+            ]
+        )
+        right = _build(
+            [
+                {
+                    "geometry": shapely.geometry.box(0, 0, 10, 10),
+                    "start_time": pd.Timestamp("2024-01-01"),
+                    "end_time": pd.Timestamp("2024-01-02"),
+                    "filepath": "labels.gpkg",
+                },
+            ]
+        )
+        joined = left.intersect(right)
+        assert len(joined) >= 1
+        assert not joined.gdf.geometry.is_empty.any()
+        assert joined.gdf.geometry.area.sum() > 0
+
+    def test_intersect_drops_boundary_only_matches(self) -> None:
+        left = _build(
+            [
+                {
+                    "geometry": shapely.geometry.box(0, 0, 1, 1),
+                    "start_time": pd.Timestamp("2024-01-01"),
+                    "end_time": pd.Timestamp("2024-01-02"),
+                    "filepath": "left.tif",
+                },
+            ]
+        )
+        right = _build(
+            [
+                {
+                    "geometry": shapely.geometry.box(1, 0, 2, 1),
+                    "start_time": pd.Timestamp("2024-01-01"),
+                    "end_time": pd.Timestamp("2024-01-02"),
+                    "filepath": "right.tif",
+                },
+            ]
+        )
+
+        assert len(left.intersect(right)) == 0
+
+    def test_intersect_rejects_unknown_engine(
+        self, two_tile_catalog: InMemoryGeoCatalog
+    ) -> None:
+        with pytest.raises(ValueError, match="Unsupported intersect engine"):
+            two_tile_catalog.intersect(two_tile_catalog, engine="missing")  # type: ignore[arg-type]
 
     def test_union(self, two_tile_catalog: InMemoryGeoCatalog) -> None:
         other = _build(
