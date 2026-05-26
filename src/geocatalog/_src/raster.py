@@ -161,9 +161,12 @@ async def _extract_rows_async(
 ) -> list[dict[str, Any]]:
     """Gather row extraction across ``filepaths`` with a fan-out cap.
 
-    Skipped rows (regex miss, transient I/O failure) come back as
-    ``None`` from the per-file extractor and are filtered here, matching
-    the sequential path's semantics.
+    Returns one row per input file in completion order. Rows whose
+    filename doesn't match ``filename_regex`` come back as ``None`` and
+    are filtered out here (matching the sequential path's semantics).
+    Transient I/O failures *are not* swallowed — ``retry_transient_io``
+    inside ``_filepath_to_row`` re-raises after exhausting its retry
+    budget, and ``asyncio.gather`` propagates the first exception.
     """
     semaphore = asyncio.Semaphore(max_concurrent)
     tasks = [
@@ -179,6 +182,56 @@ async def _extract_rows_async(
     ]
     results = await asyncio.gather(*tasks)
     return [row for row in results if row is not None]
+
+
+def _run_coroutine_safely(coro: Any) -> Any:
+    """Run ``coro`` to completion regardless of whether a loop is running.
+
+    The catalog builder's public surface is sync (returns an
+    ``InMemoryGeoCatalog``), so ``concurrency="async"`` needs a way to
+    drive its coroutine even when the caller is already inside a
+    running event loop — Jupyter, a FastAPI request handler,
+    ``pytest-asyncio``, etc. Calling :func:`asyncio.run` from inside a
+    running loop raises ``RuntimeError``, which would make the new
+    mode unusable in interactive contexts.
+
+    Strategy:
+
+    1. If no loop is running on the calling thread, dispatch to
+       :func:`asyncio.run` — the simple, default path.
+    2. If a loop *is* running, spin up a worker thread with its own
+       event loop and run the coroutine there via
+       :meth:`asyncio.new_event_loop().run_until_complete`. The
+       calling thread blocks on ``.join()`` so the sync return type is
+       preserved.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        # No loop on this thread — safe to use asyncio.run.
+        return asyncio.run(coro)
+
+    # A loop is already running on this thread. Run the coroutine on a
+    # helper thread with its own loop so we don't try to nest.
+    import threading
+
+    result_box: dict[str, Any] = {}
+
+    def _runner() -> None:
+        loop = asyncio.new_event_loop()
+        try:
+            result_box["value"] = loop.run_until_complete(coro)
+        except BaseException as exc:
+            result_box["error"] = exc
+        finally:
+            loop.close()
+
+    thread = threading.Thread(target=_runner, daemon=True)
+    thread.start()
+    thread.join()
+    if "error" in result_box:
+        raise result_box["error"]
+    return result_box["value"]
 
 
 def build_raster_catalog(
@@ -332,7 +385,7 @@ def build_raster_catalog(
     pattern = re.compile(filename_regex) if filename_regex is not None else None
     rows: list[dict[str, Any]]
     if concurrency == "async":
-        rows = asyncio.run(
+        rows = _run_coroutine_safely(
             _extract_rows_async(
                 filepaths,
                 filename_regex=pattern,

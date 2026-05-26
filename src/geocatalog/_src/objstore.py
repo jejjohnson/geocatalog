@@ -1,30 +1,33 @@
 """Process-global ``obstore`` client pool for fast COG range reads.
 
-The single point of object-store client construction for the catalog
-builder's optional async fast path. A ``dict[(scheme, bucket, region,
-endpoint) -> ObjectStore]`` is held once per process so the
-underlying HTTP/2 connection pool — and thus connection / TLS
-reuse — survives across every file we open in one Python session.
+The single point of object-store client construction for any catalog
+code path that wants connection reuse. A
+``dict[(scheme, bucket, region, endpoint) -> ObjectStore]`` is held
+once per process so the underlying HTTP/2 connection pool — and thus
+connection / TLS reuse — survives across every file we open in one
+Python session.
 
 Surfaces:
 
 - :func:`get_obstore` — return a pooled :class:`obstore.store.ObjectStore`
   for a URI.
-- :func:`get_range_bytes` — async wrapper that resolves a URI to its
-  pool entry and fetches a byte range. Used by
-  :func:`geocatalog._src.raster._filepath_to_row_async` for header
-  prefetch.
+- :func:`get_range_bytes` — async helper that resolves a URI to its
+  pool entry and fetches a byte range. Not currently called by the
+  catalog builder — rasterio uses its own GDAL CURL stack for the
+  bounds-extraction path — but exposed for downstream packages
+  (``geopatcher``'s upcoming ``ObstoreCogField`` is the first
+  consumer) and for users who want to drive header prefetch directly.
 - :func:`clear_obstore_pool` — explicit pool teardown for long-lived
   processes (notebooks).
+- :func:`set_obstore_pool_maxsize` — LRU cap.
 
 The pool is gated on the ``[obstore]`` extra; importing this module
 without it installed succeeds, but any call raises ``ImportError``
 with the install hint. This keeps the rest of the catalog importable
 on a slim install.
 
-See ``packages/openEO-RuSTAC/crates/orbit-geo/src/async_download.rs:76-140``
-(the upstream Rust pattern that motivated this) and the PR
-discussion that introduced the module for context.
+Adapted from the ``openEO-RuSTAC`` Rust pattern in
+``crates/orbit-geo/src/async_download.rs:76-140``.
 """
 
 from __future__ import annotations
@@ -221,9 +224,11 @@ def set_obstore_pool_maxsize(maxsize: int) -> None:
 
 # Fork-safety: reqwest connection pools (the engine inside obstore) are
 # not fork-safe. Clear the pool in the child after fork so each child
-# rebuilds its own clients on first use.
+# rebuilds its own clients on first use. ``os.register_at_fork`` is only
+# present on POSIX; Windows (no fork) skips the registration silently.
 def _clear_after_fork() -> None:
     clear_obstore_pool()
 
 
-os.register_at_fork(after_in_child=_clear_after_fork)
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_clear_after_fork)

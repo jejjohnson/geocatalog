@@ -82,6 +82,26 @@ def test_async_rejects_zero_max_concurrent(four_tiles):
         )
 
 
+def test_async_works_inside_running_event_loop(four_tiles):
+    """Calling the sync builder from inside a running loop must work.
+
+    Regression for the PR #62 review: ``asyncio.run`` raises
+    ``RuntimeError`` when invoked from a running loop. Jupyter,
+    FastAPI handlers, and pytest-asyncio all hit this path.
+    """
+    import asyncio
+
+    async def _from_loop():
+        # Calling the *sync* builder from an async context is the
+        # interesting case — equivalent to Jupyter's "auto-await" cell.
+        return build_raster_catalog(
+            four_tiles, filename_regex=REGEX, concurrency="async"
+        )
+
+    catalog = asyncio.run(_from_loop())
+    assert len(catalog) == 4
+
+
 def test_async_skips_unmatched_files(four_tiles, tmp_path):
     bogus = tmp_path / "no_date_here.tif"
     # Write minimal valid GeoTIFF so the open succeeds; it just won't

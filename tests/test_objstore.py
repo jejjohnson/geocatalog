@@ -5,10 +5,10 @@ from __future__ import annotations
 import pytest
 
 
-obstore = pytest.importorskip("obstore")
-# Required because the pool module imports from obstore.store inside the
-# constructor; tests below also call the public surface, so skip the
-# whole module if obstore isn't installed in this environment.
+# Skip the whole module when obstore isn't installed — the pool's
+# public surface raises ImportError on first call, and several tests
+# invoke get_obstore directly.
+pytest.importorskip("obstore")
 
 from geocatalog._src import objstore
 
