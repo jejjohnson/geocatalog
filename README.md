@@ -11,36 +11,39 @@
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 [![uv](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/uv/main/assets/badge/v0.json)](https://github.com/astral-sh/uv)
 
-> Spatiotemporal catalog over geospatial files — the `GeoSlice`-driven
-> index extracted from [geotoolz](https://github.com/jejjohnson/geotoolz).
+> **A spatiotemporal index over geospatial files.** Ask *"what overlaps this AOI between these dates?"* and get an answer in milliseconds — without opening a single file.
 
-`geocatalog` is a queryable spatiotemporal index over geospatial files.
-Each row records a file's footprint (bbox), time interval, CRS, and
-path. Given a query like *"files overlapping AOI X between dates Y and
-Z,"* the catalog returns the matching rows fast without opening any
-file.
-
-Two backends honour the same `GeoCatalog` Protocol:
-
-- `InMemoryGeoCatalog` — a `GeoDataFrame` with an R-tree + `IntervalIndex`,
-  good up to ~10⁵ rows.
-- `DuckDBGeoCatalog` — a lazy SQL relation over a GeoParquet 1.1
-  artifact, good to 10⁶+ rows and queryable from a remote URI
-  (`[duckdb]` extra).
-
-`GeoSlice` is the cross-cutting unit of work: a bbox + interval + CRS +
-resolution. Catalogs produce slices; loaders consume them.
-
-## Install
-
-```bash
-pip install geocatalog                  # base: in-memory + raster + vector
-pip install 'geocatalog[duckdb]'        # DuckDB backend
-pip install 'geocatalog[xarray-raster]' # xarray (NetCDF / Zarr) backend
-pip install 'geocatalog[full]'          # everything
+```mermaid
+flowchart LR
+    A[Source<br/><sub>STAC / CMR /<br/>EarthAccess</sub>] --> B[Bundle<br/><sub>queries +<br/>matchups</sub>]
+    B --> C[Catalog<br/><sub>InMemory or<br/>DuckDB</sub>]
+    C --> D[GeoSlice<br/><sub>bbox + interval<br/>+ CRS + res</sub>]
+    D --> E[Loader<br/><sub>load_raster /<br/>load_vector</sub>]
+    E --> F[(GeoTensor)]
+    style A fill:#e8f0fb,stroke:#4C72B0
+    style B fill:#e9f5ec,stroke:#55A868
+    style C fill:#fbe8e9,stroke:#C44E52
+    style D fill:#efeaf6,stroke:#8172B2
+    style E fill:#fbf6e3,stroke:#CCB974
+    style F fill:#eee,stroke:#888
 ```
 
-## Quickstart
+## 30-second pitch
+
+You have thousands (or millions) of GeoTIFFs / NetCDFs / Zarrs / shapefiles
+spread across local disk, S3, or a STAC API. You want to ask:
+
+- *"Which scenes touch this bbox between June and September?"*
+- *"Which label tiles overlap which Sentinel-2 chips?"*
+- *"Stream me 10⁶+ files lazily, from a remote GeoParquet, without loading them all into RAM."*
+
+`geocatalog` indexes them once and answers all three — fast. Two backends
+share one `GeoCatalog` Protocol: `InMemoryGeoCatalog` (a GeoDataFrame +
+R-tree, sub-millisecond queries up to ~10⁵ rows) and `DuckDBGeoCatalog`
+(GeoParquet 1.1 with bbox-column predicate pushdown, scales to 10⁶+ rows
+and queryable straight from `s3://` URIs).
+
+## One working snippet
 
 ```python
 import pandas as pd
@@ -63,20 +66,40 @@ aoi = gc.GeoSlice(
     crs="EPSG:32629",
 )
 
-tensor = gc.load_raster(catalog, aoi, band_indexes=[1, 2, 3])
+hits = catalog.query(aoi)            # which files? (no I/O on the files themselves)
+tensor = gc.load_raster(catalog, aoi, band_indexes=[1, 2, 3])  # materialise
 ```
 
-## Layout
+## Install
 
-The package is laid out as a hybrid: flat top-level plus
-sub-namespaces. All three of these resolve to the same symbol:
-
-```python
-from geocatalog import GeoSlice          # flat top-level
-from geocatalog.types import GeoSlice    # types sub-namespace
-from geocatalog import InMemoryGeoCatalog
-from geocatalog.catalog import InMemoryGeoCatalog
+```bash
+pip install geocatalog
 ```
+
+Or with `uv`:
+
+```bash
+uv add geocatalog
+```
+
+| Extra | Adds | When you need it |
+| --- | --- | --- |
+| *(base)* | InMemory backend, raster + vector loaders, GeoParquet roundtrip | Local files, <10⁵ rows |
+| `[duckdb]` | `DuckDBGeoCatalog`, streaming `build_*` (`backend="duckdb"`) | 10⁶+ rows, remote artifacts |
+| `[xarray-raster]` | `build_xarray_catalog`, `load_xarray` (NetCDF / Zarr) | xarray data |
+| `[stac]` | `STACSource`, `from_stac_search`, `from_stac_items` | STAC API ingestion |
+| `[fsspec]` | `s3://`, `gs://`, `az://`, `https://`, `hf://` URI support | Cloud object storage |
+| `[patch]` | `geocatalog.staging.field_for` — bridge to `geopatcher` | Patcher / tiling workflows |
+| `[full]` | All of the above | One-shot install |
+
+## Next steps
+
+- **[Docs site](https://jejjohnson.github.io/geocatalog/)** — concepts, quickstart, API
+- **[Concepts](https://jejjohnson.github.io/geocatalog/concepts/)** — mental model, backend comparison, set algebra
+- **[Quickstart](https://jejjohnson.github.io/geocatalog/quickstart/)** — 15-minute Lake Tahoe Sentinel-2 walkthrough
+- **[Recipes](https://jejjohnson.github.io/geocatalog/recipes/large-archives/)** — large archives, STAC ingestion, staging & bundles
+- **[End-to-end notebook](https://jejjohnson.github.io/geocatalog/notebooks/end_to_end_lake_tahoe/)** — discover → query → load → patch → stitch (cross-repo with [geotoolz](https://github.com/jejjohnson/geotoolz) and [geopatcher](https://github.com/jejjohnson/geopatcher))
+- **[API reference](https://jejjohnson.github.io/geocatalog/api/reference/)** — full mkdocstrings-generated reference
 
 ## Bridging to a patcher
 
@@ -86,21 +109,15 @@ archive. The canonical consumer is
 [`geotoolz.patch.SpatialPatcher`](https://github.com/jejjohnson/geotoolz),
 but any code that iterates `domain.slices()` works.
 
-## Documentation
-
-- [Catalogs concept](https://jejjohnson.github.io/geocatalog/catalogs/)
-- [API reference](https://jejjohnson.github.io/geocatalog/api/reference/)
-- Tutorials live under `docs/notebooks/`.
-
 ## Development
 
 ```bash
-make install              # uv sync --all-groups + pre-commit
-make test                 # pytest
-make format               # ruff format + ruff check --fix
-make lint                 # ruff check .
-make typecheck            # ty check src/geocatalog
-make docs-serve           # MkDocs preview
+make install   # uv sync --all-groups + pre-commit
+make test      # pytest
+make format    # ruff format + ruff check --fix
+make lint      # ruff check .
+make typecheck # ty check src/geocatalog
+make docs-serve # MkDocs preview
 ```
 
 ## License
