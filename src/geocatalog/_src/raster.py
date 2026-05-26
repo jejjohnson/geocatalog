@@ -11,6 +11,7 @@ shape.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import functools
 import re
@@ -119,6 +120,120 @@ def _filepath_to_row(
     }
 
 
+_Concurrency = Literal["sequential", "async"]
+
+
+async def _filepath_to_row_async(
+    filepath: str | Path,
+    *,
+    filename_regex: re.Pattern[str] | None,
+    date_format: str,
+    target_crs: Any | None,
+    storage_options: dict[str, Any] | None,
+    semaphore: asyncio.Semaphore,
+) -> dict[str, Any] | None:
+    """Async wrapper around :func:`_filepath_to_row` for ``concurrency="async"``.
+
+    Runs the sync extractor in a worker thread under a fan-out cap.
+    For remote URIs each thread spends almost all its time blocked on
+    network I/O, so a moderate ``Semaphore`` limit (default 8) gives
+    a wall-clock win without saturating the rasterio thread pool.
+    """
+    async with semaphore:
+        return await asyncio.to_thread(
+            _filepath_to_row,
+            filepath,
+            filename_regex=filename_regex,
+            date_format=date_format,
+            target_crs=target_crs,
+            storage_options=storage_options,
+        )
+
+
+async def _extract_rows_async(
+    filepaths: Sequence[str | Path],
+    *,
+    filename_regex: re.Pattern[str] | None,
+    date_format: str,
+    target_crs: Any | None,
+    storage_options: dict[str, Any] | None,
+    max_concurrent: int,
+) -> list[dict[str, Any]]:
+    """Gather row extraction across ``filepaths`` with a fan-out cap.
+
+    Returns one row per input file in completion order. Rows whose
+    filename doesn't match ``filename_regex`` come back as ``None`` and
+    are filtered out here (matching the sequential path's semantics).
+    Transient I/O failures *are not* swallowed — ``retry_transient_io``
+    inside ``_filepath_to_row`` re-raises after exhausting its retry
+    budget, and ``asyncio.gather`` propagates the first exception.
+    """
+    semaphore = asyncio.Semaphore(max_concurrent)
+    tasks = [
+        _filepath_to_row_async(
+            fp,
+            filename_regex=filename_regex,
+            date_format=date_format,
+            target_crs=target_crs,
+            storage_options=storage_options,
+            semaphore=semaphore,
+        )
+        for fp in filepaths
+    ]
+    results = await asyncio.gather(*tasks)
+    return [row for row in results if row is not None]
+
+
+def _run_coroutine_safely(coro: Any) -> Any:
+    """Run ``coro`` to completion regardless of whether a loop is running.
+
+    The catalog builder's public surface is sync (returns an
+    ``InMemoryGeoCatalog``), so ``concurrency="async"`` needs a way to
+    drive its coroutine even when the caller is already inside a
+    running event loop — Jupyter, a FastAPI request handler,
+    ``pytest-asyncio``, etc. Calling :func:`asyncio.run` from inside a
+    running loop raises ``RuntimeError``, which would make the new
+    mode unusable in interactive contexts.
+
+    Strategy:
+
+    1. If no loop is running on the calling thread, dispatch to
+       :func:`asyncio.run` — the simple, default path.
+    2. If a loop *is* running, spin up a worker thread with its own
+       event loop and run the coroutine there via
+       :meth:`asyncio.new_event_loop().run_until_complete`. The
+       calling thread blocks on ``.join()`` so the sync return type is
+       preserved.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        # No loop on this thread — safe to use asyncio.run.
+        return asyncio.run(coro)
+
+    # A loop is already running on this thread. Run the coroutine on a
+    # helper thread with its own loop so we don't try to nest.
+    import threading
+
+    result_box: dict[str, Any] = {}
+
+    def _runner() -> None:
+        loop = asyncio.new_event_loop()
+        try:
+            result_box["value"] = loop.run_until_complete(coro)
+        except BaseException as exc:
+            result_box["error"] = exc
+        finally:
+            loop.close()
+
+    thread = threading.Thread(target=_runner, daemon=True)
+    thread.start()
+    thread.join()
+    if "error" in result_box:
+        raise result_box["error"]
+    return result_box["value"]
+
+
 def build_raster_catalog(
     filepaths: Sequence[str | Path],
     *,
@@ -134,6 +249,8 @@ def build_raster_catalog(
     n_workers: int = 1,
     ordered: bool = False,
     storage_options: dict[str, Any] | None = None,
+    concurrency: _Concurrency = "sequential",
+    max_concurrent: int = 8,
 ) -> InMemoryGeoCatalog | DuckDBGeoCatalog:
     """Build a raster catalog — in-memory (default) or streamed to GeoParquet.
 
@@ -208,6 +325,21 @@ def build_raster_catalog(
             on the next-in-line future). Prefer ``ordered=False`` for
             skewed workloads and sort post-hoc if you need a stable byte
             layout.
+        concurrency: Extraction strategy for the ``backend="memory"``
+            branch. ``"sequential"`` (default) extracts rows one at a
+            time on the calling thread — the historical behaviour, no
+            changes for existing callers. ``"async"`` fans extraction
+            out via ``asyncio.gather`` + ``asyncio.to_thread`` so I/O
+            on independent files overlaps; meaningful win when reading
+            from a remote bucket (a 30-file build over WAN typically
+            drops from O(n_files * RTT) to O((n_files / max_concurrent)
+            * RTT)). Ignored for ``backend="duckdb"``, which already
+            has ``n_workers`` for the same purpose.
+        max_concurrent: Maximum in-flight file extractions when
+            ``concurrency="async"``. Default 8 — a sweet spot between
+            connection-reuse benefits and saturating the
+            ``ThreadPoolExecutor`` that ``asyncio.to_thread`` shares
+            across the process.
 
     Returns:
         ``InMemoryGeoCatalog`` for ``backend="memory"``, otherwise a
@@ -240,18 +372,41 @@ def build_raster_catalog(
             storage_options=storage_options,
         )
 
-    pattern = re.compile(filename_regex) if filename_regex is not None else None
-    rows: list[dict[str, Any]] = []
-    for fp in filepaths:
-        row = _filepath_to_row(
-            fp,
-            filename_regex=pattern,
-            date_format=date_format,
-            target_crs=target_crs,
-            storage_options=storage_options,
+    if concurrency not in ("sequential", "async"):
+        raise ValueError(
+            f"build_raster_catalog: concurrency must be 'sequential' or 'async'; "
+            f"got {concurrency!r}"
         )
-        if row is not None:
-            rows.append(row)
+    if max_concurrent < 1:
+        raise ValueError(
+            f"build_raster_catalog: max_concurrent must be >= 1; got {max_concurrent}"
+        )
+
+    pattern = re.compile(filename_regex) if filename_regex is not None else None
+    rows: list[dict[str, Any]]
+    if concurrency == "async":
+        rows = _run_coroutine_safely(
+            _extract_rows_async(
+                filepaths,
+                filename_regex=pattern,
+                date_format=date_format,
+                target_crs=target_crs,
+                storage_options=storage_options,
+                max_concurrent=max_concurrent,
+            )
+        )
+    else:
+        rows = []
+        for fp in filepaths:
+            row = _filepath_to_row(
+                fp,
+                filename_regex=pattern,
+                date_format=date_format,
+                target_crs=target_crs,
+                storage_options=storage_options,
+            )
+            if row is not None:
+                rows.append(row)
     if not rows:
         raise ValueError("build_raster_catalog: no files matched the regex")
 
