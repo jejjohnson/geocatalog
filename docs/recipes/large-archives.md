@@ -142,3 +142,4 @@ InMemory and swap to DuckDB when the row count grows.
 - [Recipes: STAC ingestion](from-stac.md) — populating an archive from STAC
 - [Recipes: staging & bundles](staging-and-bundles.md) — when to materialise to local disk
 - [API: `append_files`](../api/reference.md) — full signature
+- [DuckDB scale-out walkthrough ↗](https://github.com/jejjohnson/research_notebook/blob/main/projects/geostack/notebooks/catalog/04_duckdb.ipynb) — `DuckDBGeoCatalog` against a real S2 GeoParquet artifact, plus the Overture buildings recipe (billions of rows).

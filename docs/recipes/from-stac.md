@@ -156,3 +156,4 @@ Pass `bundle.catalog` anywhere a `GeoCatalog` is expected.
 - [Recipes: large archives](large-archives.md) — when the STAC query
   itself returns 10⁶+ items
 - [API: `STACSource`](../api/reference.md)
+- [Catalog intro walkthrough ↗](https://github.com/jejjohnson/research_notebook/blob/main/projects/geostack/notebooks/catalog/01_intro.ipynb) — build → query → load against a real eight-scene Sentinel-2 archive on MPC.

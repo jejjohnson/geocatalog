@@ -58,7 +58,8 @@ explicit — there is no hidden state.
     - [Large archives](recipes/large-archives.md) — partitioned Parquet + S3
     - [STAC ingestion](recipes/from-stac.md) — `STACSource` vs `from_stac_search`
     - [Staging & bundles](recipes/staging-and-bundles.md) — when to `stage()`, when to use `CatalogBundle.ingest()`
-- **[End-to-end notebook](notebooks/end_to_end_lake_tahoe.ipynb)** — discover → query → load → patch → stitch (cross-repo with `geotoolz` and `geopatcher`)
+- **[End-to-end notebook](notebooks/end_to_end_lake_tahoe.ipynb)** — discover → query → load → patch → stitch (cross-repo with `geotoolz` and `geopatcher`); this PR's canonical worked example.
+- **Extended examples ↗** — the deep dives on build/query/load, raster + xarray + vector backends, query/intersect/union set algebra, the DuckDB scale-out backend, and the catalog↔patcher bridge live in [`research_notebook/projects/geostack/notebooks/catalog`](https://github.com/jejjohnson/research_notebook/tree/main/projects/geostack/notebooks/catalog). They execute against a real Sentinel-2 archive on MPC + Natural Earth admin-1 polygons; this repo's docs reference them by name.
 - **[API Reference](api/reference.md)** — full mkdocstrings reference
 - **[CLI](cli.md)**, **[Logging](logging.md)**, **[Schema versions](schema-versions.md)**
 

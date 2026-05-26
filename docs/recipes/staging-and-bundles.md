@@ -187,3 +187,4 @@ bundle.to_directory("./bundle/")
 - [Recipes: large archives](large-archives.md) — when the catalog itself is too big to stage everything
 - [API: `stage`](../api/reference.md)
 - [API: `CatalogBundle`](../api/reference.md)
+- [Catalog backends walkthrough ↗](https://github.com/jejjohnson/research_notebook/blob/main/projects/geostack/notebooks/catalog/02_backends.ipynb) — raster (Sentinel-2) + xarray (Copernicus DEM) + vector (Natural Earth) backends end-to-end.
