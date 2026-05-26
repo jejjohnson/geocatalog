@@ -1,7 +1,8 @@
 # `geocatalog` — API Reference
 
 Curated mkdocstrings reference. For the conceptual walkthrough see
-[Catalogs](../catalogs.md).
+[Concepts](../concepts.md); for a worked example see the
+[Quickstart](../quickstart.md).
 
 ## Cross-cutting type
 
