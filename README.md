@@ -67,7 +67,7 @@ aoi = gc.GeoSlice(
 )
 
 hits = catalog.query(aoi)            # which files? (no I/O on the files themselves)
-tensor = gc.load_raster(catalog, aoi, band_indexes=[1, 2, 3])  # materialise
+tensor = gc.load_raster(hits, aoi, band_indexes=[1, 2, 3])     # materialise the hits
 ```
 
 ## Install

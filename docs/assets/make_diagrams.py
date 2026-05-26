@@ -341,7 +341,7 @@ def set_algebra(out: Path) -> None:
     axes[2].text(
         5.0,
         0.5,
-        "rows from either (dedup by filepath)",
+        "rows from either (UNION ALL — no dedup)",
         ha="center",
         fontsize=8.5,
         color="#444",

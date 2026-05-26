@@ -39,7 +39,7 @@ flowchart LR
 
 The same flow as a static figure (rendered by
 `docs/assets/make_diagrams.py` — re-run with
-`uv run python docs/assets/make_diagrams.py`):
+`uv run --group docs python docs/assets/make_diagrams.py`):
 
 ![Catalog architecture](assets/catalog-architecture.png)
 

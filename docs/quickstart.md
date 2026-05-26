@@ -14,14 +14,15 @@ The notebook continues into pipelines (`geotoolz`) and patching
 Install the extras we need:
 
 ```bash
-pip install 'geocatalog[stac,full]'
+pip install 'geocatalog[full]'
 # or with uv:
-uv add 'geocatalog[stac,full]'
+uv add 'geocatalog[full]'
 ```
 
-The `[stac]` extra pulls `pystac`, `pystac-client`, and
-`planetary-computer`. The `[full]` extra adds the DuckDB backend,
-xarray, and cloud-storage support.
+The `[full]` extra is the kitchen-sink combo — it bundles the STAC
+client (`pystac`, `pystac-client`, `planetary-computer`), the DuckDB
+backend, xarray, and cloud-storage support. If you only need the
+STAC ingestion path, `pip install 'geocatalog[stac]'` is enough.
 
 ## The scenario
 
@@ -60,6 +61,12 @@ rows = list(src.query(
     limit=50,
 ))
 print(f"discovered {len(rows)} scenes from MPC")
+
+# Build a catalog from the rows. `catalog` is the unit Step 2 below
+# expects; the next section's `from_stac_search` is the same flow in
+# one line.
+catalog = gc.InMemoryGeoCatalog.from_rows(rows, backend="raster")
+print(f"len(catalog): {len(catalog)}")
 ```
 
 `STACSource.planetary_computer()` is a thin wrapper over
@@ -115,14 +122,12 @@ original is untouched.
 Pick the lowest-cloud scene and load it:
 
 ```python
-import geopandas as gpd
-
-# Inspect the gdf to pick the cleanest scene.
+# Sort by cloud cover and take the cleanest of the top 3.
 gdf = hits.gdf.sort_values("eo:cloud_cover").head(3)
-best_row = hits.gdf.iloc[0]
+best_row = gdf.iloc[0]
 scene_slice = gc.GeoSlice(
     bounds=tuple(best_row.geometry.bounds),
-    interval=hits.gdf.index[0],   # the IntervalIndex carries the time
+    interval=best_row.name,   # IntervalIndex value for the selected row
     resolution=aoi.resolution,
     crs=aoi.crs,
 )
