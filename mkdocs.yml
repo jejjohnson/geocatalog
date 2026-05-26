@@ -42,18 +42,23 @@ plugins:
 
 nav:
   - Home: index.md
-  - Concepts:
-      - Catalogs: catalogs.md
-      - Logging: logging.md
-      - CLI: cli.md
-      - Schema versions: schema-versions.md
+  - Concepts: concepts.md
+  - Quickstart: quickstart.md
+  - Recipes:
+      - Large archives: recipes/large-archives.md
+      - STAC ingestion: recipes/from-stac.md
+      - Staging & bundles: recipes/staging-and-bundles.md
   - Tutorials:
+      - End-to-end (Lake Tahoe): notebooks/end_to_end_lake_tahoe.ipynb
       - Catalog intro: notebooks/catalog_intro.ipynb
       - Catalog set algebra: notebooks/catalog_set_algebra.ipynb
       - Catalog backends: notebooks/catalog_backends.ipynb
       - Catalog (DuckDB): notebooks/catalog_duckdb.ipynb
       - Catalog ↔ patching: notebooks/catalog_patching.ipynb
-  - API Reference: api/reference.md
+  - API reference: api/reference.md
+  - CLI: cli.md
+  - Schema versions: schema-versions.md
+  - Logging: logging.md
   - Contributing: contributing.md
   - Changelog: CHANGELOG.md
 
