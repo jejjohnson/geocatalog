@@ -33,7 +33,12 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from loguru import logger as _logger
 
-from geocatalog._src._align import Align, divide_evenly, is_grid_aligned
+from geocatalog._src._align import (
+    Align,
+    GridAlignmentWarning,
+    divide_evenly,
+    is_grid_aligned,
+)
 from geocatalog._src.base import CatalogRow, CatalogSchemaError, GeoCatalog
 from geocatalog._src.domain import CatalogDomain
 from geocatalog._src.geoslice import (
@@ -90,6 +95,7 @@ __all__ = [
     "DuckDBGeoCatalog",
     "GeoCatalog",
     "GeoSlice",
+    "GridAlignmentWarning",
     "InMemoryGeoCatalog",
     "append_files",
     "build_raster_catalog",

@@ -32,6 +32,7 @@ class TestTypesSubNamespace:
         assert set(types_ns.__all__) == {
             "Align",
             "GeoSlice",
+            "GridAlignmentWarning",
             "PIXEL_PRECISION",
             "divide_evenly",
             "is_grid_aligned",

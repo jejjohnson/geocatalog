@@ -14,13 +14,13 @@ in flight. Code that wants to "change" a slice uses
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, get_args
 
 import numpy as np
 import pandas as pd
 import pyproj
-from loguru import logger
 from rasterio import Affine
 from rasterio.windows import (
     Window,
@@ -28,7 +28,10 @@ from rasterio.windows import (
     from_bounds,
 )
 
-from geocatalog._src._align import Align, divide_evenly
+from geocatalog._src._align import Align, GridAlignmentWarning, divide_evenly
+
+
+_VALID_ALIGN_MODES: frozenset[str] = frozenset(get_args(Align))
 
 
 # Number of decimal digits within which ``(bounds, resolution)`` must
@@ -94,6 +97,15 @@ class GeoSlice:
         # object.__setattr__ is the standard escape hatch in __post_init__.
         if not isinstance(self.crs, pyproj.CRS):
             object.__setattr__(self, "crs", pyproj.CRS.from_user_input(self.crs))
+        # Reject unknown modes at construction so a typo like
+        # ``align="warning"`` doesn't silently disable validation.
+        # The `Literal` annotation is documentation, not runtime
+        # enforcement.
+        if self.align not in _VALID_ALIGN_MODES:
+            raise ValueError(
+                f"GeoSlice.align must be one of "
+                f"{sorted(_VALID_ALIGN_MODES)!r}; got {self.align!r}"
+            )
         if self.align != "off":
             self._check_or_snap_alignment()
 
@@ -103,43 +115,56 @@ class GeoSlice:
         Dispatches per-axis on the current ``align`` mode:
 
         - ``"error"`` — raise on the first misaligned axis.
-        - ``"warn"`` — log a WARNING per misaligned axis, leave bounds.
-        - ``"snap"`` — round ``xmax``/``ymax`` outward to the nearest
-          whole pixel (origin preserved); log at INFO.
+        - ``"warn"`` — emit a `GridAlignmentWarning` per misaligned
+          axis, leave bounds alone.
+        - ``"snap"`` — round outward, **preserving the affine origin**
+          for that axis. For north-up rasters the affine maps pixel
+          ``(0,0)`` to ``(xmin, ymax)``, so snap holds ``xmin`` and
+          ``ymax`` fixed and extends ``xmax`` rightward / ``ymin``
+          downward. The resulting bounds fully cover the original AOI.
         """
         xmin, ymin, xmax, ymax = self.bounds
         rx, ry = self.resolution
-        new_xmax, new_ymax = xmax, ymax
+        # For north-up rasters the affine origin is (xmin, ymax). To
+        # preserve it under snap, hold those fixed and move xmax
+        # rightward / ymin downward.
+        new_xmax, new_ymin = xmax, ymin
         axes = (
-            (xmax - xmin, rx, xmin, xmax, "x"),
-            (ymax - ymin, ry, ymin, ymax, "y"),
+            (xmax - xmin, rx, "x"),
+            (ymax - ymin, ry, "y"),
         )
-        for length, step, lo, hi, axis in axes:
+        for length, step, axis in axes:
             try:
                 divide_evenly(length, step, label=f"{axis}-extent")
             except ValueError as exc:
                 if self.align == "error":
                     raise
                 if self.align == "warn":
-                    logger.warning("GeoSlice grid misalignment: {}", exc)
+                    warnings.warn(
+                        f"GeoSlice grid misalignment: {exc}",
+                        GridAlignmentWarning,
+                        stacklevel=4,
+                    )
                     continue
                 if self.align == "snap":
                     n_up = int(np.ceil(length / step))
-                    snapped = lo + n_up * step
                     if axis == "x":
-                        new_xmax = snapped
+                        old = xmax
+                        new_xmax = xmin + n_up * step
+                        new = new_xmax
                     else:
-                        new_ymax = snapped
-                    logger.info(
-                        "GeoSlice snap: {}-extent {:.6g} -> {:.6g} (n={}, step={:.6g})",
-                        axis,
-                        hi,
-                        snapped,
-                        n_up,
-                        step,
+                        old = ymin
+                        new_ymin = ymax - n_up * step
+                        new = new_ymin
+                    warnings.warn(
+                        f"GeoSlice snap: {axis}-extent edge "
+                        f"{old:.6g} -> {new:.6g} (n={n_up}, "
+                        f"step={step:.6g})",
+                        GridAlignmentWarning,
+                        stacklevel=4,
                     )
-        if self.align == "snap" and (new_xmax != xmax or new_ymax != ymax):
-            object.__setattr__(self, "bounds", (xmin, ymin, new_xmax, new_ymax))
+        if self.align == "snap" and (new_xmax != xmax or new_ymin != ymin):
+            object.__setattr__(self, "bounds", (xmin, new_ymin, new_xmax, ymax))
 
     @property
     def shape(self) -> tuple[int, int]:

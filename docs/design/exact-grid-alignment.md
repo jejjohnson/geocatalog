@@ -51,20 +51,49 @@ existing loaders. `aligned_shape()` is the explicit strict path.
 | Mode      | Behaviour                                                          |
 | --------- | ------------------------------------------------------------------ |
 | `"off"`   | Skip the check (default; today's behaviour).                       |
-| `"warn"`  | Log a `WARNING` via loguru, keep bounds as-is.                     |
+| `"warn"`  | Emit `GridAlignmentWarning` via `warnings.warn`; keep bounds.      |
 | `"error"` | Raise `ValueError` on the first misaligned axis.                   |
-| `"snap"`  | Round `xmax`/`ymax` outward to the nearest whole pixel; log INFO.  |
+| `"snap"`  | Round outward while preserving the affine origin; warn per edit.   |
+
+Unknown / misspelled modes (e.g. `align="warning"`) raise
+`ValueError` at construction — `Literal[...]` is documentation,
+not runtime enforcement.
+
+`"warn"` and `"snap"` notices go through the **standard library
+`warnings` module**, not loguru. The package calls
+`logger.disable("geocatalog")` at import for library hygiene, so a
+loguru-based warning would be invisible by default — exactly when a
+user has opted in to be told about misaligned bounds. Filter on
+`GridAlignmentWarning` to control them:
+
+```python
+import warnings
+from geocatalog import GridAlignmentWarning
+
+warnings.simplefilter("error", GridAlignmentWarning)  # CI / tests
+warnings.simplefilter("ignore", GridAlignmentWarning) # audited pipelines
+```
 
 ```python
 GeoSlice(..., resolution=(30.0, 30.0), align="error")  # raises
-GeoSlice(..., resolution=(30.0, 30.0), align="snap")   # mutates xmax
+GeoSlice(..., resolution=(30.0, 30.0), align="snap")   # mutates bounds
 ```
 
-Snap mode adjusts the **max edges only** so the origin (`xmin`,
-`ymin`) and therefore the affine stays put. The resulting bounds
-fully cover the requested AOI (`xmax_new ≥ xmax_old`). If you need
-snap-to-nearest-grid-lattice instead (shifting `xmin` too), do it
-yourself and pass `align="error"` to verify.
+### Snap semantics: preserve the affine origin
+
+For a north-up raster the affine maps pixel `(0, 0)` to
+`(xmin, ymax)` — those two coordinates are the origin. Snap holds
+them fixed and extends the *other* edge of each axis outward:
+
+- **x-axis:** hold `xmin`, extend `xmax` rightward.
+- **y-axis:** hold `ymax`, extend `ymin` *downward* (`ymin` becomes
+  smaller).
+
+The resulting bounds fully cover the requested AOI, and
+`sl.transform.c` (= `xmin`) and `sl.transform.f` (= `ymax`) match
+the pre-snap nominal origin exactly. If you need
+snap-to-nearest-grid-lattice instead (shifting `xmin`/`ymax` too),
+do it yourself and pass `align="error"` to verify.
 
 The `align` field is **not part of slice identity**:
 

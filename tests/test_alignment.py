@@ -4,30 +4,36 @@ Covers:
 
 - `divide_evenly`: aligned passes, misaligned raises with the
   residual surfaced, custom ``tol`` honoured.
-- `GeoSlice.align` modes: ``"off"`` is silent, ``"warn"`` logs,
-  ``"error"`` raises, ``"snap"`` rounds outward.
+- `GeoSlice.align` modes: ``"off"`` is silent, ``"warn"`` emits a
+  `GridAlignmentWarning`, ``"error"`` raises, ``"snap"`` rounds
+  outward while preserving the affine origin (``xmin`` and ``ymax``
+  for north-up rasters).
+- Unknown modes are rejected at construction.
+- `warnings.warn` is visible even with `loguru.disable("geocatalog")`
+  in effect (regression for the "warn invisible by default" bug).
 - The `align` field does not participate in equality or hashing.
 - `to_crs` does not self-trip the check even with ``align="error"``
   on the parent.
 - `iter_slices` (in-memory backend) emits zero warnings on a
   misaligned catalog.
 - `is_grid_aligned`: true / false / CRS-mismatch / ``explain``
-  paths.
+  paths; y origin is checked against ``ymax`` (the north-up affine
+  origin), not ``ymin``.
 - `aligned_shape()` raises on misalignment regardless of mode.
 """
 
 from __future__ import annotations
 
-import io
+import warnings
 
 import pandas as pd
 import pytest
-from loguru import logger
 from shapely.geometry import box
 
 from geocatalog import (
     Align,
     GeoSlice,
+    GridAlignmentWarning,
     InMemoryGeoCatalog,
     divide_evenly,
     is_grid_aligned,
@@ -57,17 +63,6 @@ def _make_slice(
         crs=crs,
         align=align,
     )
-
-
-@pytest.fixture
-def loguru_sink():
-    """Attach an in-memory loguru sink; yield (buf, sink_id)."""
-    buf = io.StringIO()
-    logger.enable("geocatalog")
-    sink_id = logger.add(buf, level="TRACE", format="{level} | {message}")
-    yield buf
-    logger.remove(sink_id)
-    logger.disable("geocatalog")
 
 
 # ---------------------------------------------------------------------------
@@ -113,29 +108,72 @@ class TestAlignModes:
         with pytest.raises(ValueError, match="x-extent"):
             _make_slice((0.0, 0.0, 105.0, 100.0), (10.0, 10.0), align="error")
 
-    def test_warn_logs_and_keeps_bounds(self, loguru_sink: io.StringIO) -> None:
-        sl = _make_slice((0.0, 0.0, 105.0, 100.0), (10.0, 10.0), align="warn")
+    def test_warn_emits_grid_alignment_warning(self) -> None:
+        with pytest.warns(GridAlignmentWarning, match="x-extent"):
+            sl = _make_slice((0.0, 0.0, 105.0, 100.0), (10.0, 10.0), align="warn")
+        # warn leaves bounds untouched.
         assert sl.bounds == (0.0, 0.0, 105.0, 100.0)
-        output = loguru_sink.getvalue()
-        assert "WARNING" in output
-        assert "x-extent" in output
 
-    def test_warn_silent_when_aligned(self, loguru_sink: io.StringIO) -> None:
-        _make_slice((0.0, 0.0, 100.0, 100.0), (10.0, 10.0), align="warn")
-        assert loguru_sink.getvalue() == ""
+    def test_warn_silent_when_aligned(self) -> None:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", GridAlignmentWarning)
+            # No warning → no exception under the strict filter.
+            _make_slice((0.0, 0.0, 100.0, 100.0), (10.0, 10.0), align="warn")
 
-    def test_snap_rounds_outward(self) -> None:
-        # 105 wide at 10m → ceil(10.5) = 11 → snap to 110.
-        sl = _make_slice((0.0, 0.0, 105.0, 100.0), (10.0, 10.0), align="snap")
+    def test_warn_visible_without_logger_enable(self) -> None:
+        """`align="warn"` must not be silenced by `loguru.disable`.
+
+        Regression for the codex bug: the package calls
+        `logger.disable("geocatalog")` at import, so a loguru-based
+        warn implementation would be invisible by default. Stdlib
+        `warnings.warn` is independent of the loguru namespace, so a
+        user who opts into `align="warn"` actually sees the notice.
+        """
+        # Importing geocatalog has already run logger.disable; do NOT
+        # call logger.enable here, simulating a default user.
+        with pytest.warns(GridAlignmentWarning):
+            _make_slice((0.0, 0.0, 105.0, 100.0), (10.0, 10.0), align="warn")
+
+    def test_unknown_mode_rejected(self) -> None:
+        # A misspelled mode like "warning" must NOT silently disable
+        # validation. Literal[...] is not enforced at runtime.
+        with pytest.raises(ValueError, match=r"align must be one of"):
+            _make_slice(align="warning")  # type: ignore[arg-type]
+
+    def test_snap_x_extends_xmax(self) -> None:
+        # 105 wide at 10m → ceil(10.5) = 11 → xmax 105 → 110;
+        # xmin (the affine x origin) stays at 0.
+        with pytest.warns(GridAlignmentWarning):
+            sl = _make_slice((0.0, 0.0, 105.0, 100.0), (10.0, 10.0), align="snap")
         assert sl.bounds == (0.0, 0.0, 110.0, 100.0)
-        # The snapped slice must be aligned per the strict path.
         assert sl.aligned_shape() == (10, 11)
 
-    def test_snap_preserves_origin(self) -> None:
-        # snap mutates max edges only, never the origin.
-        sl = _make_slice((50.0, 50.0, 155.0, 100.0), (10.0, 10.0), align="snap")
-        assert sl.bounds[0] == 50.0
-        assert sl.bounds[1] == 50.0
+    def test_snap_y_extends_ymin_downward(self) -> None:
+        """snap-y holds `ymax` fixed (north-up affine origin).
+
+        Regression for the codex bug: previously snap-y mutated
+        `ymax`, shifting the affine origin. The corrected behaviour
+        holds `ymax` and pushes `ymin` downward to round outward.
+        """
+        # y-extent 100.5 at 10 → ceil = 11 pixels → height 110 m;
+        # ymax=100.5 preserved, ymin pushed from 0 to -9.5.
+        with pytest.warns(GridAlignmentWarning):
+            sl = _make_slice((0.0, 0.0, 100.0, 100.5), (10.0, 10.0), align="snap")
+        assert sl.bounds[3] == 100.5  # ymax preserved (affine origin)
+        assert sl.bounds[1] == pytest.approx(-9.5)  # ymin extended down
+        # And the snapped slice's affine transform still maps pixel
+        # (0,0) to the original (xmin, ymax) corner.
+        assert sl.transform.f == 100.5
+        assert sl.aligned_shape() == (11, 10)
+
+    def test_snap_preserves_affine_origin(self) -> None:
+        # The whole point of preserving (xmin, ymax) is that the
+        # affine transform's c (x origin) and f (y origin) match the
+        # pre-snap slice's nominal origin exactly.
+        with pytest.warns(GridAlignmentWarning):
+            sl = _make_slice((50.0, 50.0, 155.0, 100.5), (10.0, 10.0), align="snap")
+        assert sl.transform.c == 50.0  # xmin
+        assert sl.transform.f == 100.5  # ymax
 
 
 # ---------------------------------------------------------------------------
@@ -197,7 +235,7 @@ class TestToCrsDoesNotSelfTrip:
 
 
 class TestIterSlicesQuiet:
-    def test_inmemory_iter_slices_silent(self, loguru_sink: io.StringIO) -> None:
+    def test_inmemory_iter_slices_silent(self) -> None:
         import geopandas as gpd
 
         # Arbitrary footprints that don't divide evenly at 30m.
@@ -219,12 +257,15 @@ class TestIterSlicesQuiet:
             closed="both",
         )
         cat = InMemoryGeoCatalog(gdf, backend="raster")
-        slices = list(cat.iter_slices(resolution=(30.0, 30.0)))
+        with warnings.catch_warnings():
+            # Any GridAlignmentWarning emitted during iteration would
+            # be a regression — turn it into an error to assert
+            # silence.
+            warnings.simplefilter("error", GridAlignmentWarning)
+            slices = list(cat.iter_slices(resolution=(30.0, 30.0)))
         assert len(slices) == 2
-        # All emitted slices must carry align="off" so they are
-        # silent and do not raise downstream.
+        # All emitted slices must carry align="off".
         assert all(s.align == "off" for s in slices)
-        assert "misalignment" not in loguru_sink.getvalue()
 
 
 # ---------------------------------------------------------------------------
@@ -240,14 +281,36 @@ class TestIsGridAligned:
 
     def test_same_lattice_different_extent(self) -> None:
         # Origins differ by an integer multiple of resolution → aligned.
+        # Both xmin (0, 30) and ymax (100, 90) congruent mod 10.
         a = _make_slice((0.0, 0.0, 100.0, 100.0), (10.0, 10.0))
         b = _make_slice((30.0, 20.0, 80.0, 90.0), (10.0, 10.0))
         assert is_grid_aligned(a, b) is True
 
-    def test_origin_off_by_subpixel_not_aligned(self) -> None:
+    def test_x_origin_off_by_subpixel_not_aligned(self) -> None:
         a = _make_slice((0.0, 0.0, 100.0, 100.0), (10.0, 10.0))
         b = _make_slice((0.5, 0.0, 100.5, 100.0), (10.0, 10.0))
         assert is_grid_aligned(a, b) is False
+
+    def test_y_origin_uses_ymax_not_ymin(self) -> None:
+        """The north-up affine origin is `ymax`; lattice check uses it.
+
+        Regression for the codex bug: previously this check compared
+        `ymin`, so two slices with matching `ymin` but `ymax` off by
+        a non-integer multiple of the resolution were wrongly
+        reported as aligned.
+
+        Construct two slices that:
+        - share `ymin = 0` (so the old buggy check thinks they align),
+        - have `ymax` differing by 5 m (half a pixel at 10 m) so the
+          true affine origins differ by a subpixel residual.
+        """
+        a = _make_slice((0.0, 0.0, 100.0, 100.0), (10.0, 10.0))
+        b = _make_slice((0.0, 0.0, 100.0, 105.0), (10.0, 10.0))
+        # ymax differs by 5 → subpixel residual at 10m resolution.
+        assert is_grid_aligned(a, b) is False
+        report = is_grid_aligned(a, b, explain=True)
+        assert isinstance(report, dict)
+        assert abs(abs(report["y_origin_residual"]) - 5.0) < 1e-9
 
     def test_resolution_mismatch_not_aligned(self) -> None:
         a = _make_slice((0.0, 0.0, 100.0, 100.0), (10.0, 10.0))
@@ -314,3 +377,4 @@ class TestHybridLayoutExports:
         assert types_ns.divide_evenly is geocatalog.divide_evenly
         assert types_ns.is_grid_aligned is geocatalog.is_grid_aligned
         assert types_ns.Align is geocatalog.Align
+        assert types_ns.GridAlignmentWarning is geocatalog.GridAlignmentWarning

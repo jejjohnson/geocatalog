@@ -37,11 +37,26 @@ Align = Literal["off", "warn", "error", "snap"]
 """Construction-time alignment policy for `GeoSlice`.
 
 - ``"off"``: skip the check entirely (today's behaviour).
-- ``"warn"``: log a ``WARNING`` via loguru and continue with the
-  original bounds.
+- ``"warn"``: emit a `GridAlignmentWarning` via the standard library
+  ``warnings`` module and continue with the original bounds.
 - ``"error"``: raise ``ValueError`` on the first misaligned axis.
-- ``"snap"``: round the max edge outward to the nearest whole pixel.
+- ``"snap"``: round outward while preserving the affine origin
+  (``xmin`` and ``ymax`` for north-up rasters).
 """
+
+
+class GridAlignmentWarning(UserWarning):
+    """Emitted by `GeoSlice` for ``align="warn"`` and ``align="snap"``.
+
+    A dedicated subclass so applications can filter alignment notices
+    independently of other ``UserWarning``\\ s — e.g. via
+    ``warnings.simplefilter("error", GridAlignmentWarning)`` in tests
+    or ``"ignore"`` in pipelines that have audited their slice sites.
+
+    Inherits from `UserWarning` so it is visible by default; unlike a
+    loguru log record it is not silenced by the library's
+    ``logger.disable("geocatalog")`` import-time hygiene.
+    """
 
 
 def _default_tol() -> float:
@@ -128,8 +143,11 @@ def is_grid_aligned(
 
     rx_a, ry_a = a.resolution
     rx_b, ry_b = b.resolution
-    xmin_a, ymin_a, _, _ = a.bounds
-    xmin_b, ymin_b, _, _ = b.bounds
+    # North-up affine origin is (xmin, ymax) — the top-left corner
+    # — so the lattice question is about congruence of xmin and ymax
+    # modulo resolution, not ymin.
+    xmin_a, _, _, ymax_a = a.bounds
+    xmin_b, _, _, ymax_b = b.bounds
 
     crs_match = a.crs == b.crs
     x_res_match = abs(rx_a - rx_b) <= tol
@@ -144,7 +162,7 @@ def is_grid_aligned(
         x_origin_match = False
 
     if y_res_match:
-        y_off = (ymin_a - ymin_b) / ry_a
+        y_off = (ymax_a - ymax_b) / ry_a
         y_origin_residual = (y_off - round(y_off)) * ry_a
         y_origin_match = abs(y_origin_residual) <= tol
     else:

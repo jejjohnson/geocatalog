@@ -94,9 +94,13 @@ escape hatches:
   return type, but raises `ValueError` with the residual when the
   extent isn't an integer multiple of the resolution.
 - The `align=` constructor argument enables construction-time
-  validation: `"warn"` logs, `"error"` raises, `"snap"` rounds the
-  max edges outward so the bounds fully cover the requested AOI.
-  Default is `"off"` (today's silent behaviour).
+  validation: `"warn"` emits a `GridAlignmentWarning` (via stdlib
+  `warnings.warn`, so it's visible regardless of loguru's
+  library-quiet default), `"error"` raises, `"snap"` rounds outward
+  while preserving the affine origin (`xmin` and `ymax` for
+  north-up) — `xmax` extends rightward, `ymin` extends downward.
+  Default is `"off"` (today's silent behaviour). Unknown modes are
+  rejected at construction.
 
 The `align` argument is *not* part of slice identity — two slices
 with the same bounds, interval, resolution, and CRS compare equal
