@@ -30,8 +30,12 @@ class TestTypesSubNamespace:
 
     def test_all_lists_named_symbols(self) -> None:
         assert set(types_ns.__all__) == {
+            "Align",
             "GeoSlice",
+            "GridAlignmentWarning",
             "PIXEL_PRECISION",
+            "divide_evenly",
+            "is_grid_aligned",
             "slice_to_window",
             "window_to_slice",
         }

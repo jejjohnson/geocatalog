@@ -333,12 +333,15 @@ class InMemoryGeoCatalog:
             `GeoSlice` instances in catalog row order.
         """
         crs = pyproj.CRS.from_user_input(self.gdf.crs)
+        # `align="off"` because footprints are arbitrary shapes; see
+        # the matching comment in `DuckDBGeoCatalog.iter_slices`.
         for interval, geom in zip(self.gdf.index, self.gdf.geometry, strict=True):
             yield GeoSlice(
                 bounds=tuple(geom.bounds),  # type: ignore[arg-type]
                 interval=interval,
                 resolution=resolution,
                 crs=crs,
+                align="off",
             )
 
     def where(self, query: str) -> InMemoryGeoCatalog:

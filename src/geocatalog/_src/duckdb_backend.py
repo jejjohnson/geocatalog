@@ -713,12 +713,18 @@ class DuckDBGeoCatalog:
         Yields:
             `GeoSlice` instances in catalog row order.
         """
+        # `align="off"` because footprints are arbitrary shapes; their
+        # bbox extents are almost never integer multiples of an
+        # arbitrary target resolution, so a stricter default would
+        # warn on every row. Callers wanting validation call
+        # `aligned_shape()` on the emitted slice.
         for row in self.iter_rows():
             yield GeoSlice(
                 bounds=tuple(row.geometry.bounds),  # type: ignore[arg-type]
                 interval=row.interval,
                 resolution=resolution,
                 crs=row.crs,
+                align="off",
             )
 
     # ── properties + persistence ─────────────────────────────────────────
