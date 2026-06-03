@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 
+
 if TYPE_CHECKING:
     from geocatalog._src.geoslice import GeoSlice
 

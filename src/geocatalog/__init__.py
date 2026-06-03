@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from loguru import logger as _logger
 
+from geocatalog._src._align import Align, divide_evenly, is_grid_aligned
 from geocatalog._src.base import CatalogRow, CatalogSchemaError, GeoCatalog
 from geocatalog._src.domain import CatalogDomain
 from geocatalog._src.geoslice import (
@@ -82,6 +83,7 @@ __version__ = "0.0.2"
 __all__ = [
     "PIXEL_PRECISION",
     "SCHEMA_VERSION_CURRENT",
+    "Align",
     "CatalogDomain",
     "CatalogRow",
     "CatalogSchemaError",
@@ -93,10 +95,12 @@ __all__ = [
     "build_raster_catalog",
     "build_vector_catalog",
     "build_xarray_catalog",
+    "divide_evenly",
     "from_geoparquet",
     "from_stac_items",
     "from_stac_search",
     "intersect",
+    "is_grid_aligned",
     "load_raster",
     "load_raster_timeseries",
     "load_vector",

@@ -8,6 +8,7 @@ from the flat top-level surface, so both
 
 from __future__ import annotations
 
+from geocatalog._src._align import Align, divide_evenly, is_grid_aligned
 from geocatalog._src.geoslice import (
     PIXEL_PRECISION,
     GeoSlice,
@@ -18,7 +19,10 @@ from geocatalog._src.geoslice import (
 
 __all__ = [
     "PIXEL_PRECISION",
+    "Align",
     "GeoSlice",
+    "divide_evenly",
+    "is_grid_aligned",
     "slice_to_window",
     "window_to_slice",
 ]
