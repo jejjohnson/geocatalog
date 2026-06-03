@@ -113,37 +113,27 @@ class TestAlignModes:
         with pytest.raises(ValueError, match="x-extent"):
             _make_slice((0.0, 0.0, 105.0, 100.0), (10.0, 10.0), align="error")
 
-    def test_warn_logs_and_keeps_bounds(
-        self, loguru_sink: io.StringIO
-    ) -> None:
-        sl = _make_slice(
-            (0.0, 0.0, 105.0, 100.0), (10.0, 10.0), align="warn"
-        )
+    def test_warn_logs_and_keeps_bounds(self, loguru_sink: io.StringIO) -> None:
+        sl = _make_slice((0.0, 0.0, 105.0, 100.0), (10.0, 10.0), align="warn")
         assert sl.bounds == (0.0, 0.0, 105.0, 100.0)
         output = loguru_sink.getvalue()
         assert "WARNING" in output
         assert "x-extent" in output
 
-    def test_warn_silent_when_aligned(
-        self, loguru_sink: io.StringIO
-    ) -> None:
+    def test_warn_silent_when_aligned(self, loguru_sink: io.StringIO) -> None:
         _make_slice((0.0, 0.0, 100.0, 100.0), (10.0, 10.0), align="warn")
         assert loguru_sink.getvalue() == ""
 
     def test_snap_rounds_outward(self) -> None:
         # 105 wide at 10m → ceil(10.5) = 11 → snap to 110.
-        sl = _make_slice(
-            (0.0, 0.0, 105.0, 100.0), (10.0, 10.0), align="snap"
-        )
+        sl = _make_slice((0.0, 0.0, 105.0, 100.0), (10.0, 10.0), align="snap")
         assert sl.bounds == (0.0, 0.0, 110.0, 100.0)
         # The snapped slice must be aligned per the strict path.
         assert sl.aligned_shape() == (10, 11)
 
     def test_snap_preserves_origin(self) -> None:
         # snap mutates max edges only, never the origin.
-        sl = _make_slice(
-            (50.0, 50.0, 155.0, 100.0), (10.0, 10.0), align="snap"
-        )
+        sl = _make_slice((50.0, 50.0, 155.0, 100.0), (10.0, 10.0), align="snap")
         assert sl.bounds[0] == 50.0
         assert sl.bounds[1] == 50.0
 
@@ -207,9 +197,7 @@ class TestToCrsDoesNotSelfTrip:
 
 
 class TestIterSlicesQuiet:
-    def test_inmemory_iter_slices_silent(
-        self, loguru_sink: io.StringIO
-    ) -> None:
+    def test_inmemory_iter_slices_silent(self, loguru_sink: io.StringIO) -> None:
         import geopandas as gpd
 
         # Arbitrary footprints that don't divide evenly at 30m.

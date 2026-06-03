@@ -93,9 +93,7 @@ class GeoSlice:
         # are well-defined. Frozen dataclasses forbid normal assignment;
         # object.__setattr__ is the standard escape hatch in __post_init__.
         if not isinstance(self.crs, pyproj.CRS):
-            object.__setattr__(
-                self, "crs", pyproj.CRS.from_user_input(self.crs)
-            )
+            object.__setattr__(self, "crs", pyproj.CRS.from_user_input(self.crs))
         if self.align != "off":
             self._check_or_snap_alignment()
 
@@ -123,9 +121,7 @@ class GeoSlice:
                 if self.align == "error":
                     raise
                 if self.align == "warn":
-                    logger.warning(
-                        "GeoSlice grid misalignment: {}", exc
-                    )
+                    logger.warning("GeoSlice grid misalignment: {}", exc)
                     continue
                 if self.align == "snap":
                     n_up = int(np.ceil(length / step))
@@ -135,20 +131,15 @@ class GeoSlice:
                     else:
                         new_ymax = snapped
                     logger.info(
-                        "GeoSlice snap: {}-extent {:.6g} -> {:.6g} "
-                        "(n={}, step={:.6g})",
+                        "GeoSlice snap: {}-extent {:.6g} -> {:.6g} (n={}, step={:.6g})",
                         axis,
                         hi,
                         snapped,
                         n_up,
                         step,
                     )
-        if self.align == "snap" and (
-            new_xmax != xmax or new_ymax != ymax
-        ):
-            object.__setattr__(
-                self, "bounds", (xmin, ymin, new_xmax, new_ymax)
-            )
+        if self.align == "snap" and (new_xmax != xmax or new_ymax != ymax):
+            object.__setattr__(self, "bounds", (xmin, ymin, new_xmax, new_ymax))
 
     @property
     def shape(self) -> tuple[int, int]:

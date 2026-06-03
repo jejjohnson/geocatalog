@@ -52,7 +52,7 @@ def _default_tol() -> float:
     """
     from geocatalog._src.geoslice import PIXEL_PRECISION
 
-    return 10 ** -PIXEL_PRECISION
+    return 10**-PIXEL_PRECISION
 
 
 def divide_evenly(
@@ -152,11 +152,7 @@ def is_grid_aligned(
         y_origin_match = False
 
     aligned = bool(
-        crs_match
-        and x_res_match
-        and y_res_match
-        and x_origin_match
-        and y_origin_match
+        crs_match and x_res_match and y_res_match and x_origin_match and y_origin_match
     )
 
     if explain:
