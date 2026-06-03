@@ -14,17 +14,21 @@ in flight. Code that wants to "change" a slice uses
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
+import numpy as np
 import pandas as pd
 import pyproj
+from loguru import logger
 from rasterio import Affine
 from rasterio.windows import (
     Window,
     bounds as window_bounds,
     from_bounds,
 )
+
+from geocatalog._src._align import Align, divide_evenly
 
 
 # Number of decimal digits within which ``(bounds, resolution)`` must
@@ -51,6 +55,16 @@ class GeoSlice:
     interval: pd.Interval
     resolution: tuple[float, float]
     crs: pyproj.CRS
+    # Construction-time alignment policy. NOT part of identity:
+    # two slices with the same bounds/interval/resolution/crs compare
+    # equal and hash equal regardless of ``align`` (see #6.7 of the
+    # design doc / geopatcher#59).
+    align: Align = field(
+        default="off",
+        compare=False,
+        hash=False,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
         xmin, ymin, xmax, ymax = self.bounds
@@ -79,7 +93,62 @@ class GeoSlice:
         # are well-defined. Frozen dataclasses forbid normal assignment;
         # object.__setattr__ is the standard escape hatch in __post_init__.
         if not isinstance(self.crs, pyproj.CRS):
-            object.__setattr__(self, "crs", pyproj.CRS.from_user_input(self.crs))
+            object.__setattr__(
+                self, "crs", pyproj.CRS.from_user_input(self.crs)
+            )
+        if self.align != "off":
+            self._check_or_snap_alignment()
+
+    def _check_or_snap_alignment(self) -> None:
+        """Validate or snap ``bounds`` against the alignment policy.
+
+        Dispatches per-axis on the current ``align`` mode:
+
+        - ``"error"`` — raise on the first misaligned axis.
+        - ``"warn"`` — log a WARNING per misaligned axis, leave bounds.
+        - ``"snap"`` — round ``xmax``/``ymax`` outward to the nearest
+          whole pixel (origin preserved); log at INFO.
+        """
+        xmin, ymin, xmax, ymax = self.bounds
+        rx, ry = self.resolution
+        new_xmax, new_ymax = xmax, ymax
+        axes = (
+            (xmax - xmin, rx, xmin, xmax, "x"),
+            (ymax - ymin, ry, ymin, ymax, "y"),
+        )
+        for length, step, lo, hi, axis in axes:
+            try:
+                divide_evenly(length, step, label=f"{axis}-extent")
+            except ValueError as exc:
+                if self.align == "error":
+                    raise
+                if self.align == "warn":
+                    logger.warning(
+                        "GeoSlice grid misalignment: {}", exc
+                    )
+                    continue
+                if self.align == "snap":
+                    n_up = int(np.ceil(length / step))
+                    snapped = lo + n_up * step
+                    if axis == "x":
+                        new_xmax = snapped
+                    else:
+                        new_ymax = snapped
+                    logger.info(
+                        "GeoSlice snap: {}-extent {:.6g} -> {:.6g} "
+                        "(n={}, step={:.6g})",
+                        axis,
+                        hi,
+                        snapped,
+                        n_up,
+                        step,
+                    )
+        if self.align == "snap" and (
+            new_xmax != xmax or new_ymax != ymax
+        ):
+            object.__setattr__(
+                self, "bounds", (xmin, ymin, new_xmax, new_ymax)
+            )
 
     @property
     def shape(self) -> tuple[int, int]:
@@ -98,6 +167,25 @@ class GeoSlice:
     @property
     def width(self) -> int:
         return self.shape[1]
+
+    def aligned_shape(self) -> tuple[int, int]:
+        """Strict ``shape``: raises on misalignment regardless of mode.
+
+        Use this when you need a guaranteed-exact pixel count without
+        flipping the constructor's default ``align`` mode. ``.shape``
+        stays `round`-based for backwards compatibility with existing
+        loaders.
+
+        Raises:
+            ValueError: if either axis's extent is not an integer
+                multiple of its resolution (within tolerance).
+        """
+        rx, ry = self.resolution
+        xmin, ymin, xmax, ymax = self.bounds
+        return (
+            divide_evenly(ymax - ymin, ry, label="y-extent"),
+            divide_evenly(xmax - xmin, rx, label="x-extent"),
+        )
 
     @property
     def transform(self) -> Affine:
@@ -131,11 +219,16 @@ class GeoSlice:
         new_h = new_bounds[3] - new_bounds[1]
         x_res = self.resolution[0] * (new_w / old_w)
         y_res = self.resolution[1] * (new_h / old_h)
+        # Reprojected bounds are *generically* non-integer multiples
+        # of the rescaled resolution; force align="off" so a strict
+        # parent's policy doesn't cause to_crs to raise on its own
+        # output. Callers wanting validation can reconstruct.
         return GeoSlice(
             bounds=new_bounds,
             interval=self.interval,
             resolution=(x_res, y_res),
             crs=target,
+            align="off",
         )
 
 
