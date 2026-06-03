@@ -82,6 +82,33 @@ use `dataclasses.replace(aoi, bounds=...)`. The explicit copy is
 intentional — silent mutation of a query that's been logged is the
 worst kind of bug.
 
+### Grid alignment
+
+`GeoSlice.shape` rounds `(xmax-xmin)/x_res` to the nearest integer,
+which silently accepts bounds that aren't a whole number of pixels.
+That's fine for most pipelines but bites at the matchup boundary
+(stacking a chip against a label raster a pixel short). Two opt-in
+escape hatches:
+
+- `aligned_shape()` is the strict counterpart to `.shape` — same
+  return type, but raises `ValueError` with the residual when the
+  extent isn't an integer multiple of the resolution.
+- The `align=` constructor argument enables construction-time
+  validation: `"warn"` logs, `"error"` raises, `"snap"` rounds the
+  max edges outward so the bounds fully cover the requested AOI.
+  Default is `"off"` (today's silent behaviour).
+
+The `align` argument is *not* part of slice identity — two slices
+with the same bounds, interval, resolution, and CRS compare equal
+and hash equal regardless of mode.
+
+For cross-source co-registration there's `is_grid_aligned(a, b)`,
+which returns `True` iff `a` and `b` share a pixel lattice (same
+resolution + origins congruent mod resolution + same CRS). Pass
+`explain=True` for per-axis residual diagnostics.
+
+See `docs/design/exact-grid-alignment.md` for the full design.
+
 ## Schema model
 
 The shared row schema across backends:
