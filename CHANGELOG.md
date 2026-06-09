@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.0.3](https://github.com/jejjohnson/geocatalog/compare/v0.0.2...v0.0.3) (2026-06-03)
+
+
+### Features
+
+* **builder:** obstore client pool + async concurrency for build_raster_catalog ([#62](https://github.com/jejjohnson/geocatalog/issues/62)) ([10c187a](https://github.com/jejjohnson/geocatalog/commit/10c187a0c9e52b679fffa63efedf798a44317c45))
+* exact grid alignment for GeoSlice (divide_evenly, align modes, is_grid_aligned) ([#64](https://github.com/jejjohnson/geocatalog/issues/64)) ([02a5e37](https://github.com/jejjohnson/geocatalog/commit/02a5e37289f9fa646c171d49cc5062eb6eab8fce))
+
 ## [0.0.2](https://github.com/jejjohnson/geocatalog/compare/v0.0.1...v0.0.2) (2026-05-25)
 
 
