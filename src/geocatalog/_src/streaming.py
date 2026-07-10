@@ -52,6 +52,7 @@ if TYPE_CHECKING:
 
 from loguru import logger as log
 
+from geocatalog._src.base import INTERNAL_COLUMNS, RESERVED_COLUMNS
 from geocatalog._src.parquet import SCHEMA_VERSION_CURRENT as _SCHEMA_VERSION
 
 
@@ -335,9 +336,8 @@ class StreamingParquetWriter:
                 )
             )
         # Extras: infer per-column type from the sample row.
-        reserved = {"filepath", "start_time", "end_time", "geometry", "bbox"}
         for key, value in sample.items():
-            if key in reserved:
+            if key in RESERVED_COLUMNS:
                 continue
             fields.append(pa.field(key, _infer_arrow_type(value)))
         fields.append(pa.field("_backend", pa.string()))
@@ -536,7 +536,9 @@ def _write_arrow_batch(writer: StreamingParquetWriter, batch: pa.RecordBatch) ->
     """
     table = pa.Table.from_batches([batch])
     cols = {name: table.column(name).to_pylist() for name in table.column_names}
-    drop = {"bbox", "_backend", "_schema_version"}
+    # The writer re-emits its own `bbox` covering struct on top of the
+    # internal schema columns, so all three are dropped from the input.
+    drop = {"bbox"} | INTERNAL_COLUMNS
     geom_wkb = cols.pop("geometry")
     for i in range(table.num_rows):
         row = {name: vals[i] for name, vals in cols.items() if name not in drop}

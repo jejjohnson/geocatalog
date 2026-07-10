@@ -12,34 +12,18 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-from typing import Any
 
-import geopandas as gpd
 import pandas as pd
 import pytest
 from shapely.geometry import box
+
+from tests.conftest import catalog_from_rows
 
 
 geopatcher = pytest.importorskip("geopatcher")
 
 from geocatalog._src.memory import InMemoryGeoCatalog
 from geocatalog._src.staging import field_for, stage
-
-
-def _catalog(
-    *,
-    rows: list[dict[str, Any]],
-    target_crs: str = "EPSG:32629",
-) -> InMemoryGeoCatalog:
-    """Build an InMemoryGeoCatalog from a list of row dicts."""
-    gdf = gpd.GeoDataFrame(rows, crs=target_crs)
-    gdf.index = pd.IntervalIndex.from_arrays(
-        gdf.pop("start_time"),
-        gdf.pop("end_time"),
-        closed="both",
-        name="datetime",
-    )
-    return InMemoryGeoCatalog(gdf, backend="raster")
 
 
 @pytest.fixture
@@ -57,7 +41,7 @@ def asset_catalog(tmp_path: Path, utm29_tile_factory) -> InMemoryGeoCatalog:
     nir1 = utm29_tile_factory(
         (500_320, 4_000_000, 500_640, 4_000_320), "20240118", value=40
     )
-    cat = _catalog(
+    cat = catalog_from_rows(
         rows=[
             {
                 "geometry": box(500_000, 4_000_000, 500_320, 4_000_320),
@@ -74,6 +58,7 @@ def asset_catalog(tmp_path: Path, utm29_tile_factory) -> InMemoryGeoCatalog:
                 "assets": json.dumps({"red": str(red1), "nir": str(nir1)}),
             },
         ],
+        crs="EPSG:32629",
     )
     return stage(cat, dest=tmp_path / "cache")
 
@@ -84,7 +69,7 @@ def legacy_catalog(tmp_path: Path, utm29_tile_factory) -> InMemoryGeoCatalog:
     path = utm29_tile_factory(
         (500_000, 4_000_000, 500_320, 4_000_320), "20240115", value=7
     )
-    return _catalog(
+    return catalog_from_rows(
         rows=[
             {
                 "geometry": box(500_000, 4_000_000, 500_320, 4_000_320),
@@ -93,6 +78,7 @@ def legacy_catalog(tmp_path: Path, utm29_tile_factory) -> InMemoryGeoCatalog:
                 "filepath": str(path),
             }
         ],
+        crs="EPSG:32629",
     )
 
 
@@ -212,7 +198,7 @@ class TestFieldForErrors:
         good = utm29_tile_factory(
             (500_000, 4_000_000, 500_320, 4_000_320), "20240115", value=10
         )
-        cat = _catalog(
+        cat = catalog_from_rows(
             rows=[
                 {
                     "geometry": box(500_000, 4_000_000, 500_320, 4_000_320),
@@ -223,7 +209,8 @@ class TestFieldForErrors:
                         {"red": str(good), "nir": "https://nope.example/never.tif"}
                     ),
                 }
-            ]
+            ],
+            crs="EPSG:32629",
         )
         with pytest.raises(KeyError, match=r"non-local URIs"):
             field_for(cat, "nir")

@@ -27,6 +27,28 @@ if TYPE_CHECKING:
     from geocatalog._src.geoslice import GeoSlice
 
 
+RESERVED_COLUMNS: frozenset[str] = frozenset(
+    {"filepath", "start_time", "end_time", "geometry", "bbox"}
+)
+"""Column names reserved by the catalog schema itself.
+
+Every GeoParquet artifact carries these as its required layout
+(``bbox`` only when the writer emits the GeoParquet 1.1 covering
+struct); backend row iterators and schema builders treat anything
+else as user extras. Spelled once here so the streaming writer and
+the backends can't drift.
+"""
+
+INTERNAL_COLUMNS: frozenset[str] = frozenset({"_backend", "_schema_version"})
+"""Writer-managed metadata columns of the on-disk schema.
+
+Appended by `StreamingParquetWriter` (and `to_geoparquet`) to every
+artifact; they are not user-visible row metadata, so readers filter
+them out of ``extras`` and rewrite passes drop them before re-encoding
+(the writer re-emits its own).
+"""
+
+
 class CatalogSchemaError(ValueError):
     """A GeoParquet artifact has a `_schema_version` the reader can't load.
 

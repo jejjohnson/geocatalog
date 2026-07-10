@@ -41,9 +41,13 @@ from loguru import logger as log
 if TYPE_CHECKING:
     import duckdb as duckdb_mod
 
-from geocatalog._src.base import CatalogRow
+from geocatalog._src.base import RESERVED_COLUMNS, CatalogRow
 from geocatalog._src.geoslice import GeoSlice
-from geocatalog._src.memory import InMemoryGeoCatalog, _coerce_interval
+from geocatalog._src.memory import (
+    InMemoryGeoCatalog,
+    _coerce_interval,
+    _reproject_bounds,
+)
 from geocatalog._src.retry import retry_transient_io
 
 
@@ -681,13 +685,12 @@ class DuckDBGeoCatalog:
         geoms = _decode_geometry_column(df["geometry"])
         starts = pd.to_datetime(df["start_time"])
         ends = pd.to_datetime(df["end_time"])
-        reserved = {"geometry", "filepath", "start_time", "end_time", "bbox"}
         # `_backend`, `_schema_version` and any other underscore-prefixed
         # column belong to the on-disk schema, not the user-visible row
         # metadata. Filtering them keeps `extras` clean for downstream
         # loaders that introspect it.
         extra_cols = [
-            c for c in df.columns if c not in reserved and not c.startswith("_")
+            c for c in df.columns if c not in RESERVED_COLUMNS and not c.startswith("_")
         ]
         for i in range(len(df)):
             extras = {c: df[c].iloc[i] for c in extra_cols}
@@ -1193,24 +1196,3 @@ def _decode_geometry_column(col: pd.Series) -> list[Any]:
         # Last-ditch: try shapely's parser.
         out.append(shapely.from_wkb(val))
     return out
-
-
-def _reproject_bounds(
-    bounds: tuple[float, float, float, float],
-    src_crs: Any | None,
-    dst_crs: pyproj.CRS,
-) -> tuple[float, float, float, float]:
-    """Reproject AOI bounds into ``dst_crs``, no-op when CRSs match.
-
-    Mirrors `geocatalog._src.memory._reproject_bounds` — kept
-    local so the DuckDB module doesn't reach into the InMemory module's
-    private surface. ``src_crs=None`` is treated as "already in
-    catalog CRS"; the bbox passes through unchanged.
-    """
-    if src_crs is None:
-        return bounds
-    src = pyproj.CRS.from_user_input(src_crs)
-    if src == dst_crs:
-        return bounds
-    transformer = pyproj.Transformer.from_crs(src, dst_crs, always_xy=True)
-    return transformer.transform_bounds(*bounds)  # type: ignore[return-value]

@@ -24,10 +24,16 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pandas as pd
-import shapely.geometry
 from loguru import logger
 
 from geocatalog._src.sources._base import AuthStatus, Bounds, Source, SourceRow
+from geocatalog._src.sources._umm import (
+    asset_key_from_url as _asset_key_from_url,
+    extract_cloud_cover as _extract_cloud_cover,
+    granule_geometry as _granule_geometry,
+    granule_interval as _granule_interval,
+    umm_essentials as _umm_essentials,
+)
 
 
 # CMR public search root. Granule and collection endpoints branch
@@ -214,10 +220,9 @@ def _cmr_item_to_source_row(
     """Map a CMR UMM-JSON `items[...]` entry to a `SourceRow`.
 
     Uses the same geometry / interval / asset extraction logic as
-    the `earthaccess` adapter; this mirrors the path because the
-    UMM schema is the same regardless of which client you use to
-    fetch it. We re-implement here to keep the adapters
-    independent (no cross-import).
+    the `earthaccess` adapter — the UMM schema is the same regardless
+    of which client you use to fetch it, so both adapters share the
+    decoders in `geocatalog._src.sources._umm`.
     """
     umm = item.get("umm")
     if not isinstance(umm, Mapping):
@@ -270,148 +275,3 @@ def _cmr_item_to_source_row(
             "source_version": "cmr/umm_json",
         },
     )
-
-
-# Local copies of the helpers used by `earthaccess.py`. We
-# deliberately don't reach across modules so the two adapters can
-# evolve their granule decoders independently if CMR ever diverges
-# from earthaccess's view.
-
-
-def _granule_geometry(
-    umm: Mapping[str, Any],
-) -> shapely.geometry.base.BaseGeometry | None:
-    spatial = umm.get("SpatialExtent")
-    if not isinstance(spatial, Mapping):
-        return None
-    h = spatial.get("HorizontalSpatialDomain")
-    if not isinstance(h, Mapping):
-        return None
-    geom = h.get("Geometry")
-    if not isinstance(geom, Mapping):
-        return None
-    gpolys = geom.get("GPolygons")
-    if gpolys:
-        polys = []
-        for poly in gpolys:
-            boundary = poly.get("Boundary", {}) if isinstance(poly, Mapping) else {}
-            points = boundary.get("Points") if isinstance(boundary, Mapping) else None
-            if not points:
-                continue
-            ring: list[tuple[float, float]] = []
-            for pt in points:
-                if not isinstance(pt, Mapping):
-                    continue
-                lon = pt.get("Longitude")
-                lat = pt.get("Latitude")
-                if lon is None or lat is None:
-                    continue
-                ring.append((lon, lat))
-            if len(ring) >= 3:
-                polys.append(shapely.geometry.Polygon(ring))
-        if polys:
-            return shapely.geometry.MultiPolygon(polys) if len(polys) > 1 else polys[0]
-    rects = geom.get("BoundingRectangles")
-    if rects:
-        boxes = []
-        for r in rects:
-            if not isinstance(r, Mapping):
-                continue
-            try:
-                boxes.append(
-                    shapely.geometry.box(
-                        r["WestBoundingCoordinate"],
-                        r["SouthBoundingCoordinate"],
-                        r["EastBoundingCoordinate"],
-                        r["NorthBoundingCoordinate"],
-                    )
-                )
-            except KeyError:
-                continue
-        if boxes:
-            return shapely.geometry.MultiPolygon(boxes) if len(boxes) > 1 else boxes[0]
-    points = geom.get("Points")
-    if points:
-        shapes = []
-        for pt in points:
-            if not isinstance(pt, Mapping):
-                continue
-            lon = pt.get("Longitude")
-            lat = pt.get("Latitude")
-            if lon is None or lat is None:
-                continue
-            shapes.append(shapely.geometry.Point(lon, lat))
-        if shapes:
-            return shapely.geometry.MultiPoint(shapes) if len(shapes) > 1 else shapes[0]
-    return None
-
-
-def _granule_interval(umm: Mapping[str, Any]) -> pd.Interval | None:
-    temporal = umm.get("TemporalExtent")
-    if not isinstance(temporal, Mapping):
-        return None
-    rng = temporal.get("RangeDateTime")
-    if isinstance(rng, Mapping):
-        start = rng.get("BeginningDateTime")
-        end = rng.get("EndingDateTime")
-        if start and end:
-            return pd.Interval(_to_utc(start), _to_utc(end), closed="both")
-    single = temporal.get("SingleDateTime")
-    if single:
-        ts = _to_utc(single)
-        return pd.Interval(ts, ts, closed="both")
-    return None
-
-
-def _to_utc(value: str | datetime) -> pd.Timestamp:
-    ts = pd.Timestamp(value)
-    return ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
-
-
-def _asset_key_from_url(url: str) -> str:
-    from urllib.parse import urlparse
-
-    parsed = urlparse(url)
-    leaf = (parsed.path.rstrip("/").rsplit("/", 1) or [""])[-1]
-    if "." in leaf:
-        stem, ext = leaf.rsplit(".", 1)
-        if stem and len(stem) <= 64:
-            return stem
-        return ext or leaf
-    return leaf or url[-32:]
-
-
-def _extract_cloud_cover(umm: Mapping[str, Any]) -> float | None:
-    if "CloudCover" in umm:
-        try:
-            return float(umm["CloudCover"])
-        except (TypeError, ValueError):
-            pass
-    extras = umm.get("AdditionalAttributes", [])
-    if isinstance(extras, list):
-        for attr in extras:
-            if isinstance(attr, Mapping) and attr.get("Name", "").lower().startswith(
-                "cloud"
-            ):
-                values = attr.get("Values", [])
-                if values:
-                    try:
-                        return float(values[0])
-                    except (TypeError, ValueError):
-                        pass
-    return None
-
-
-def _umm_essentials(umm: Mapping[str, Any]) -> dict[str, Any]:
-    keep = (
-        "GranuleUR",
-        "CollectionReference",
-        "DataGranule",
-        "TemporalExtent",
-        "ProviderDates",
-        "Platforms",
-        "AdditionalAttributes",
-        "CloudCover",
-        "MetadataSpecification",
-    )
-    return {k: umm[k] for k in keep if k in umm}

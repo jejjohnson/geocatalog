@@ -11,8 +11,9 @@ Joins iterables of `SourceRow`s on space + time:
 * Emit a `MatchupRow` per surviving secondary, plus N-way fan-out
   when ``secondary`` is a mapping of role → iterable.
 
-Once `catalog.ingest()` is wired up (subsequent PR), a thin wrapper
-will take a `GeoCatalog` + selector and stream rows into this engine.
+The shipped ingestion API — `CatalogBundle.ingest` — is the thin
+wrapper that takes a catalog + selector and streams rows into this
+engine.
 
 See ``docs/design/query-matchup.md`` §4.4 / §4.6.
 """
@@ -26,6 +27,9 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
 
 import pandas as pd
+
+from geocatalog._src._timeutil import to_utc_ts
+from geocatalog._src.matchup.temporal import _midpoint
 
 
 if TYPE_CHECKING:
@@ -147,12 +151,9 @@ def _midpoint_seconds(interval: pd.Interval, reference: datetime) -> float:
     """Return ``(midpoint - reference).total_seconds()`` for an interval.
 
     Used as the temporal-offset entry in `MatchupRow.time_offset_sec`.
-    The midpoint convention is symmetric across instantaneous and
-    range-shaped intervals.
+    The midpoint convention (shared with the temporal strategies via
+    `geocatalog._src.matchup.temporal._midpoint`) is symmetric across
+    instantaneous and range-shaped intervals.
     """
-    mid = (
-        pd.Timestamp(interval.left)
-        + (pd.Timestamp(interval.right) - pd.Timestamp(interval.left)) / 2
-    )
-    mid = mid.tz_localize("UTC") if mid.tzinfo is None else mid.tz_convert("UTC")
+    mid = to_utc_ts(_midpoint(interval))
     return (mid.to_pydatetime() - reference).total_seconds()
