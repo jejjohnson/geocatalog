@@ -4,12 +4,17 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Any
 
+import geopandas as gpd
 import numpy as np
+import pandas as pd
 import pytest
 import rasterio
 from hypothesis import settings
 from rasterio.transform import from_bounds
+
+from geocatalog._src.memory import InMemoryGeoCatalog
 
 
 # Hypothesis profiles. Two are registered:
@@ -28,6 +33,34 @@ settings.register_profile(
     settings(deadline=None, print_blob=True),
 )
 settings.load_profile(os.environ.get("HYPOTHESIS_PROFILE", "dev"))
+
+
+def catalog_from_rows(
+    rows: list[dict[str, Any]],
+    *,
+    crs: str,
+) -> InMemoryGeoCatalog:
+    """Build an `InMemoryGeoCatalog` from a list of row dicts.
+
+    Each row dict must carry ``geometry``, ``start_time`` and
+    ``end_time`` (popped into the catalog's IntervalIndex) plus any
+    extras columns the test needs (``filepath``, ``assets``, ...).
+
+    Args:
+        rows: Row dicts, one per catalog entry.
+        crs: CRS assigned to the built GeoDataFrame.
+
+    Returns:
+        A raster-backend `InMemoryGeoCatalog` over the rows.
+    """
+    gdf = gpd.GeoDataFrame(rows, crs=crs)
+    gdf.index = pd.IntervalIndex.from_arrays(
+        gdf.pop("start_time"),
+        gdf.pop("end_time"),
+        closed="both",
+        name="datetime",
+    )
+    return InMemoryGeoCatalog(gdf, backend="raster")
 
 
 @pytest.fixture

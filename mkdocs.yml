@@ -55,8 +55,11 @@ nav:
   - CLI: cli.md
   - Schema versions: schema-versions.md
   - Logging: logging.md
+  - Design:
+      - Exact grid alignment: design/exact-grid-alignment.md
+      - Query & matchup: design/query-matchup.md
   - Contributing: contributing.md
-  - Changelog: CHANGELOG.md
+  - Changelog: changelog.md
 
 markdown_extensions:
   - admonition
@@ -64,6 +67,8 @@ markdown_extensions:
       generic: true
   - pymdownx.highlight:
       anchor_linenums: true
+  - pymdownx.snippets:
+      check_paths: true
   - pymdownx.superfences
   - pymdownx.tabbed:
       alternate_style: true

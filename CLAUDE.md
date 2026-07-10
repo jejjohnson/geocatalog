@@ -4,13 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-<!-- TODO: Replace with your project description -->
-A Python package. Built with Python 3.12+, uv, pytest, and MkDocs.
+`geocatalog` is a queryable spatiotemporal index over geospatial files: build a catalog from a directory of rasters / vectors / NetCDF-Zarr stores (or a STAC/CMR search), query it by bbox + time via the `GeoSlice` contract, and materialise pixels only when a loader (`load_raster`, `load_vector`, `load_xarray`) is called. Two backends behind one `GeoCatalog` Protocol — an in-memory `GeoDataFrame` catalog (`InMemoryGeoCatalog`) and a lazy DuckDB backend for archive-scale artifacts — with GeoParquet as the persisted, schema-versioned interchange format (`to_geoparquet` / `from_geoparquet` / `migrate_geoparquet`). Discovery `Source` adapters (STAC, NASA earthaccess, CMR; GEE is scaffolding) feed `CatalogBundle.ingest`, which records per-query provenance; the `matchup` engine joins rows across sources with pluggable spatial/temporal strategies, and `staging.stage()` resolves remote URIs into a local cache (`field_for` bridges staged catalogs to `geopatcher` Fields). A `geocatalog` CLI (cyclopts) wraps build/query/stats/info/migrate/convert. Layout is hybrid: implementation in `src/geocatalog/_src/`, re-exported through facade sub-namespaces (`geocatalog.catalog`, `.types`, `.sources`, `.matchup`, `.bundle`, `.staging`) and the flat top level; optional dependencies are extras-gated with lazy imports (`[duckdb]`, `[stac]`, `[earthaccess]`, `[gee]`, `[xarray-raster]`, `[patch]`, `[full]`). Built with Python 3.12+, uv, pytest, and MkDocs.
 
 ## Common Commands
 
 ```bash
-make install              # Install all deps (uv sync --all-groups) + pre-commit hooks
+make install              # Install all deps (uv sync --all-groups --all-extras) + pre-commit hooks
 make test                 # Run tests: uv run pytest -v
 make format               # Auto-fix: ruff format . && ruff check --fix .
 make lint                 # Lint code: ruff check .

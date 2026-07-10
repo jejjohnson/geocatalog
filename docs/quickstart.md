@@ -62,12 +62,30 @@ rows = list(src.query(
 ))
 print(f"discovered {len(rows)} scenes from MPC")
 
-# Build a catalog from the rows. `catalog` is the unit Step 2 below
-# expects; the next section's `from_stac_search` is the same flow in
-# one line.
-catalog = gc.InMemoryGeoCatalog.from_rows(rows, backend="raster")
+# Build a catalog from the rows: map each SourceRow onto a
+# GeoDataFrame row (footprint geometry + start/end times + the B04
+# asset URL as `filepath`), then wrap it in the in-memory backend.
+# `catalog` is the unit Step 2 below expects; the next section's
+# `from_stac_search` is the same flow in one line.
+import geopandas as gpd
+from geocatalog.bundle import source_row_to_gdf_row
+
+gdf = gpd.GeoDataFrame(
+    [
+        source_row_to_gdf_row(row, target_crs="EPSG:4326", primary_asset="B04")
+        for row in rows
+    ],
+    crs="EPSG:4326",
+)
+catalog = gc.InMemoryGeoCatalog(gdf, backend="raster")
 print(f"len(catalog): {len(catalog)}")
 ```
+
+If you want provenance (which query produced which rows), use
+[`CatalogBundle`](api/reference.md#bundle) instead —
+`CatalogBundle.empty().ingest(src, bounds=..., interval=..., ...)`
+runs the same `Source.query` internally and records a `QueryRecord`
+per call.
 
 `STACSource.planetary_computer()` is a thin wrapper over
 `pystac-client` + `planetary-computer.sign`. Every yielded `SourceRow`
@@ -86,6 +104,7 @@ catalog = gc.from_stac_search(
     datetime="2024-06-01/2024-09-30",
     asset_key="B04",   # red band
     max_items=50,
+    extra_properties=["eo:cloud_cover"],   # keep as a catalog column
 )
 print(f"len(catalog): {len(catalog)}")
 print(f"catalog.total_bounds: {catalog.total_bounds}")
@@ -119,7 +138,10 @@ original is untouched.
 
 ## 3. Load a single scene
 
-Pick the lowest-cloud scene and load it:
+Pick the lowest-cloud scene and load it. The `eo:cloud_cover` column
+below comes from the `extra_properties` we passed to
+`from_stac_search` (the `source_row_to_gdf_row` path keeps properties
+JSON-encoded in a `properties` column instead):
 
 ```python
 # Sort by cloud cover and take the cleanest of the top 3.

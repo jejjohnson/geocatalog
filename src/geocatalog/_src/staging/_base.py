@@ -43,6 +43,8 @@ from urllib.parse import urlparse
 import geopandas as gpd
 from loguru import logger
 
+from geocatalog._src.retry import _is_transient
+
 
 if TYPE_CHECKING:
     from os import PathLike
@@ -73,10 +75,17 @@ class LocalCache:
         ttl_days: Optional lifetime. When set, cached files older
             than this many days are re-downloaded. ``None`` means
             cache forever.
+        timeout: Per-download timeout in seconds, forwarded to
+            ``fsspec.open`` so a stalled remote read cannot hang a
+            worker slot forever. ``None`` disables the timeout.
+            Enforcement is filesystem-dependent: the keyword is
+            passed through to the fsspec backend, and backends that
+            do not understand it typically ignore it.
     """
 
     root: PathLike[str] | str | None = None
     ttl_days: int | None = None
+    timeout: float | None = 60.0
 
     def resolve_root(self) -> Path:
         """Return the resolved cache root (creates it on first call)."""
@@ -138,10 +147,12 @@ def stage(
             GIL on I/O so threads scale well even in pure Python.
         cache: Reuse an existing cache instance. ``None`` builds a
             default one bound to ``dest`` (or the env-var default).
-        retries: Per-asset retry budget. Network blips, partial
-            reads, and stale credentials all surface as exceptions;
-            we retry up to this many times before failing the
-            asset (and the row, under ``on_error="raise"``).
+        retries: Per-asset retry budget for *transient* failures
+            only (network blips, partial reads — the classification
+            in `geocatalog._src.retry`). Fatal errors such as
+            `FileNotFoundError` or `PermissionError` fail the asset
+            immediately without burning the retry budget; either way
+            a failed asset is then subject to ``on_error``.
         on_error: ``"raise"`` (default) — any failed asset stops
             the stage and propagates. ``"skip"`` — keep the
             original URI in the asset map and continue; the row
@@ -337,6 +348,14 @@ def _fetch_one(uri: str, cache: LocalCache, retries: int) -> Path:
     Skips the download when the cached file already exists and is
     within TTL. For local URIs (no scheme or ``file://``) we
     avoid the fsspec copy and link / return the existing path.
+
+    Only *transient* failures (per `geocatalog._src.retry`'s
+    classification — network blips, partial reads, non-fatal
+    `OSError`) are retried, up to ``retries`` times with bounded
+    exponential backoff. Fatal errors (`FileNotFoundError`,
+    `PermissionError`, …) propagate immediately without retrying.
+    When ``cache.timeout`` is set it is forwarded to ``fsspec.open``
+    (enforcement is filesystem-dependent — see `LocalCache`).
     """
     import fsspec
 
@@ -352,11 +371,20 @@ def _fetch_one(uri: str, cache: LocalCache, retries: int) -> Path:
         if local.exists():
             return local
 
+    # Only forward `timeout` when set: fsspec passes unknown kwargs
+    # through to the backend, and omitting the key entirely is the
+    # safest "disabled" spelling across filesystem implementations.
+    open_kwargs: dict[str, Any] = {}
+    if cache.timeout is not None:
+        open_kwargs["timeout"] = cache.timeout
+
     dest.parent.mkdir(parents=True, exist_ok=True)
-    last_exc: Exception | None = None
     for attempt in range(retries + 1):
         try:
-            with fsspec.open(uri, mode="rb") as src, dest.open("wb") as dst:
+            with (
+                fsspec.open(uri, mode="rb", **open_kwargs) as src,
+                dest.open("wb") as dst,
+            ):
                 # Stream in chunks so we don't materialise a 5 GB
                 # asset into memory. fsspec's `open` returns a
                 # file-like; `read1`/`readinto` would be marginally
@@ -368,31 +396,31 @@ def _fetch_one(uri: str, cache: LocalCache, retries: int) -> Path:
                     dst.write(chunk)
             return dest
         except Exception as exc:
-            last_exc = exc
             # On any failure, scrub a partial file so the next
             # attempt starts clean.
             if dest.exists():
                 with contextlib.suppress(OSError):
                     dest.unlink()
-            if attempt < retries:
-                # Exponential-ish backoff: 0.5 / 1.0 / 2.0 / ...
-                # Bounded at 16s to keep total retry time predictable.
-                import time
+            # Fatal errors (404-style missing objects, auth /
+            # permission problems, …) will not heal on retry —
+            # propagate immediately instead of burning the budget.
+            if not _is_transient(exc) or attempt >= retries:
+                raise
+            # Exponential-ish backoff: 0.5 / 1.0 / 2.0 / ...
+            # Bounded at 16s to keep total retry time predictable.
+            import time
 
-                sleep_for = min(0.5 * (2**attempt), 16.0)
-                logger.debug(
-                    "stage: retry {}/{} for {!r} after {}s ({})",
-                    attempt + 1,
-                    retries,
-                    uri,
-                    sleep_for,
-                    exc,
-                )
-                time.sleep(sleep_for)
-            else:
-                break
-    assert last_exc is not None
-    raise last_exc
+            sleep_for = min(0.5 * (2**attempt), 16.0)
+            logger.debug(
+                "stage: retry {}/{} for {!r} after {}s ({})",
+                attempt + 1,
+                retries,
+                uri,
+                sleep_for,
+                exc,
+            )
+            time.sleep(sleep_for)
+    raise AssertionError("unreachable")  # pragma: no cover
 
 
 def _ext_for(uri: str) -> str:

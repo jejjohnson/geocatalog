@@ -1061,7 +1061,7 @@ wheels = [
 
 [[package]]
 name = "geocatalog"
-version = "0.0.2"
+version = "0.0.3"
 source = { editable = "." }
 dependencies = [
     { name = "cyclopts" },
@@ -1187,8 +1187,8 @@ requires-dist = [
     { name = "gcsfs", marker = "extra == 'fsspec'", specifier = ">=2025.12.0" },
     { name = "gcsfs", marker = "extra == 'full'", specifier = ">=2025.12.0" },
     { name = "geopandas", specifier = ">=0.14" },
-    { name = "geopatcher", marker = "extra == 'full'", git = "https://github.com/jejjohnson/geopatcher?rev=1b5a8b73acce0b4860d5030bc589253eb2b79dc1" },
-    { name = "geopatcher", marker = "extra == 'patch'", git = "https://github.com/jejjohnson/geopatcher?rev=1b5a8b73acce0b4860d5030bc589253eb2b79dc1" },
+    { name = "geopatcher", marker = "extra == 'full'", git = "https://github.com/jejjohnson/geopatcher?rev=4950b85a57bf5d6ce49a6ce451d190fd69edd0d2" },
+    { name = "geopatcher", marker = "extra == 'patch'", git = "https://github.com/jejjohnson/geopatcher?rev=4950b85a57bf5d6ce49a6ce451d190fd69edd0d2" },
     { name = "georeader-spaceml", specifier = ">=2.1" },
     { name = "loguru", specifier = ">=0.7" },
     { name = "numpy", specifier = ">=1.26" },
@@ -1264,8 +1264,8 @@ wheels = [
 
 [[package]]
 name = "geopatcher"
-version = "0.0.2"
-source = { git = "https://github.com/jejjohnson/geopatcher?rev=1b5a8b73acce0b4860d5030bc589253eb2b79dc1#1b5a8b73acce0b4860d5030bc589253eb2b79dc1" }
+version = "0.0.5"
+source = { git = "https://github.com/jejjohnson/geopatcher?rev=4950b85a57bf5d6ce49a6ce451d190fd69edd0d2#4950b85a57bf5d6ce49a6ce451d190fd69edd0d2" }
 dependencies = [
     { name = "georeader-spaceml" },
     { name = "numpy" },

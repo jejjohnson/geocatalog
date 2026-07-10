@@ -13,6 +13,7 @@ import pyproj
 import shapely.geometry
 import shapely.ops
 
+from geocatalog._src._timeutil import to_rfc3339, to_utc_ts
 from geocatalog._src.base import GeoCatalog
 from geocatalog._src.memory import InMemoryGeoCatalog
 from geocatalog._src.parquet import to_geoparquet
@@ -347,26 +348,23 @@ def _datetime_or_none(value: Any) -> Any | None:
 def _to_utc_datetime(value: Any | None) -> Any | None:
     """Coerce a Python datetime to tz-aware UTC; naive inputs assumed UTC.
 
-    The catalog's stored time-axis contract is UTC, so a naive
-    timestamp is treated as already being in UTC rather than rejected.
-    pystac requires tz-aware datetimes for RFC3339-canonical output.
+    None-passing wrapper over `geocatalog._src._timeutil.to_utc_ts`.
+    pystac requires tz-aware datetimes for RFC3339-canonical output,
+    hence the ``.to_pydatetime()`` conversion.
     """
     if value is None:
         return None
-    ts = pd.Timestamp(value)
-    ts = ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
-    return ts.to_pydatetime()
+    return to_utc_ts(value).to_pydatetime()
 
 
 def _to_rfc3339(value: Any | None) -> str | None:
-    """Serialize a datetime as STAC-canonical RFC3339 (UTC, ``Z`` suffix)."""
+    """Serialize a datetime as STAC-canonical RFC3339 (UTC, ``Z`` suffix).
+
+    None-passing wrapper over `geocatalog._src._timeutil.to_rfc3339`.
+    """
     if value is None:
         return None
-    ts = pd.Timestamp(value)
-    ts = ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
-    # `.isoformat()` on a UTC-aware Timestamp yields ``...+00:00``;
-    # STAC canonical form uses ``Z``.
-    return ts.isoformat().replace("+00:00", "Z")
+    return to_rfc3339(value)
 
 
 def _same_instant(left: Any | None, right: Any | None) -> bool:

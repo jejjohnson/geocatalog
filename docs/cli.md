@@ -99,6 +99,31 @@ out     single
 rows    1247891
 ```
 
+### `migrate`
+
+Rewrite an artifact in place at a target schema version. A thin
+wrapper over `migrate_geoparquet`; see
+[Schema versions](schema-versions.md) for the migration policy.
+
+```console
+$ geocatalog migrate catalog.parquet
+catalog.parquet already at v0
+
+$ geocatalog migrate catalog.parquet --to-version 0
+catalog.parquet already at v0
+```
+
+`--to-version` defaults to the reader's current schema version
+(`SCHEMA_VERSION_CURRENT`, currently 0 — so today every invocation
+reports "already at v0"; once the schema version is bumped, older
+artifacts print `wrote catalog.parquet (v0 -> v1)`). Migrations are
+idempotent — re-running against an already-migrated artifact leaves
+the file untouched.
+
+Exit codes follow the shared table below: `3` when the source is
+missing or unreadable, `2` on a corrupt artifact or schema mismatch
+(`CatalogSchemaError`).
+
 ## Output formats
 
 Every subcommand accepts `--json` to switch from the human-readable

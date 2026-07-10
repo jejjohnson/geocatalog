@@ -15,6 +15,7 @@ behaviour through it. The tests below cover:
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Callable
 from pathlib import Path
 
@@ -161,6 +162,10 @@ def test_exit_3_missing_source(
     assert "not found" in capsys.readouterr().err
 
 
+@pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0,
+    reason="chmod-based unreadability is ineffective for root",
+)
 def test_exit_3_unreadable_source(
     tmp_path: Path,
     utm29_tile_factory: Callable[..., Path],

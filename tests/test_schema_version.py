@@ -22,6 +22,7 @@ from geocatalog import (
     SCHEMA_VERSION_CURRENT,
     CatalogSchemaError,
     from_geoparquet,
+    migrate_geoparquet,
     to_geoparquet,
 )
 from geocatalog._cli import app
@@ -199,6 +200,162 @@ def test_mixed_version_shards_raise(
 
     with pytest.raises(CatalogSchemaError, match="mixed `_schema_version`"):
         from_geoparquet(mixed)
+
+
+# ---------------------------------------------------------------------------
+# Synthetic multi-step migration chain
+# ---------------------------------------------------------------------------
+#
+# `_MIGRATIONS` is empty today (current schema is v0), so the *chained*
+# path through `_apply_migrations` — and the "missing migration =
+# library bug" guard — have never run against a real schema bump. These
+# tests inject a synthetic v0 -> v1 -> v2 chain via monkeypatch (never
+# mutating the real registry) to prove the machinery end-to-end before
+# the first real bump relies on it.
+
+
+class TestSyntheticMigrationChain:
+    """Prove `_apply_migrations` chains multiple synthetic migrations."""
+
+    @staticmethod
+    def _install_chain(
+        monkeypatch: pytest.MonkeyPatch,
+        calls: list[str],
+        *,
+        include_1_to_2: bool = True,
+    ) -> None:
+        """Pretend the library is at v2 with synthetic migrations registered.
+
+        Patches `parquet_module.SCHEMA_VERSION_CURRENT` to 2 and swaps in
+        a fresh `_MIGRATIONS` dict (the real registry is never mutated;
+        monkeypatch restores both after the test). Each migration appends
+        to ``calls`` and stamps a breadcrumb column so both order and
+        effect are observable in the output artifact.
+        """
+
+        def _v0_to_v1(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+            calls.append("0->1")
+            gdf = gdf.copy()
+            gdf["_migrated_0_1"] = True
+            return gdf
+
+        def _v1_to_v2(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+            calls.append("1->2")
+            # Order proof: the v0 -> v1 breadcrumb must already exist.
+            assert "_migrated_0_1" in gdf.columns
+            gdf = gdf.copy()
+            gdf["_migrated_1_2"] = True
+            return gdf
+
+        migrations = {0: _v0_to_v1}
+        if include_1_to_2:
+            migrations[1] = _v1_to_v2
+        monkeypatch.setattr(parquet_module, "SCHEMA_VERSION_CURRENT", 2)
+        monkeypatch.setattr(parquet_module, "_MIGRATIONS", migrations)
+
+    def test_two_step_chain_applies_in_order(
+        self,
+        tmp_path: Path,
+        utm29_tile_factory: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """`migrate_geoparquet` chains v0 -> v1 -> v2, output reads back at v2."""
+        out = _build_artifact(tmp_path, utm29_tile_factory, schema_version=0)
+        calls: list[str] = []
+        self._install_chain(monkeypatch, calls)
+
+        v_before = migrate_geoparquet(out, to_version=2)
+
+        assert v_before == 0
+        assert calls == ["0->1", "1->2"]
+        # The rewritten artifact is stamped at v2 ...
+        assert parquet_module._read_schema_version(out) == 2
+        # ... and both transforms landed in the persisted rows.
+        cat = from_geoparquet(out)
+        assert len(cat) == 1
+        assert bool(cat.gdf["_migrated_0_1"].iloc[0])
+        assert bool(cat.gdf["_migrated_1_2"].iloc[0])
+        # Loading the v2 artifact did not re-run any migration.
+        assert calls == ["0->1", "1->2"]
+
+    def test_chain_gap_raises_library_bug(
+        self,
+        tmp_path: Path,
+        utm29_tile_factory: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """v2 current with only v0 -> v1 registered: the v1 -> v2 gap raises."""
+        out = _build_artifact(tmp_path, utm29_tile_factory, schema_version=0)
+        calls: list[str] = []
+        self._install_chain(monkeypatch, calls, include_1_to_2=False)
+
+        with pytest.raises(CatalogSchemaError) as info:
+            migrate_geoparquet(out, to_version=2)
+        msg = str(info.value)
+        assert "missing migration v1 -> v2" in msg
+        assert "library bug" in msg
+        assert calls == ["0->1"]  # the registered step ran; the gap stopped it
+        # The failure happened before any rewrite — the artifact is intact
+        # at v0, not half-migrated.
+        assert parquet_module._read_schema_version(out) == 0
+
+    def test_rerunning_migrate_on_v2_artifact_is_noop(
+        self,
+        tmp_path: Path,
+        utm29_tile_factory: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Migrating the chain's own v2 output again changes nothing."""
+        out = _build_artifact(tmp_path, utm29_tile_factory, schema_version=0)
+        calls: list[str] = []
+        self._install_chain(monkeypatch, calls)
+        assert migrate_geoparquet(out, to_version=2) == 0
+        calls.clear()
+        payload = out.read_bytes()
+
+        v_before = migrate_geoparquet(out, to_version=2)
+
+        assert v_before == 2
+        assert calls == []  # no migration re-ran
+        assert out.read_bytes() == payload  # file was not rewritten
+
+    def test_migrate_cli_runs_synthetic_chain(
+        self,
+        tmp_path: Path,
+        utm29_tile_factory: Callable[..., Path],
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """`geocatalog migrate --to-version 2` drives the synthetic chain.
+
+        The CLI re-imports `SCHEMA_VERSION_CURRENT` from the top-level
+        `geocatalog` namespace — a *separate binding* from the patched
+        `parquet_module.SCHEMA_VERSION_CURRENT` — so the target version
+        is passed explicitly via ``--to-version`` rather than patching a
+        second namespace. `migrate_geoparquet` itself resolves its
+        globals from `parquet_module`, so the single patch reaches the
+        CLI path.
+        """
+        out = _build_artifact(tmp_path, utm29_tile_factory, schema_version=0)
+        calls: list[str] = []
+        self._install_chain(monkeypatch, calls)
+
+        try:
+            result = app(
+                ["migrate", str(out), "--to-version", "2"],
+                exit_on_error=False,
+                result_action="return_value",
+            )
+        except SystemExit as exc:
+            result = exc.code
+
+        assert result == 0
+        assert "(v0 -> v2)" in capsys.readouterr().out
+        assert calls == ["0->1", "1->2"]
+        assert parquet_module._read_schema_version(out) == 2
+        cat = from_geoparquet(out)
+        assert bool(cat.gdf["_migrated_0_1"].iloc[0])
+        assert bool(cat.gdf["_migrated_1_2"].iloc[0])
 
 
 def test_read_schema_version_cheap_for_migrate(

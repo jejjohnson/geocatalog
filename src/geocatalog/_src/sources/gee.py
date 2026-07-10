@@ -58,6 +58,14 @@ class GEESource(Source):
         filters: Mapping[str, Any] | None = None,
         limit: int | None = None,
     ) -> Iterator[SourceRow]:
+        """Enumerate EE assets intersecting ``bounds`` + ``interval``.
+
+        Scaffolding — not yet implemented (Phase 3, design §8).
+
+        Raises:
+            NotImplementedError: Always, until the staging layer can
+                materialize ``ee.Image`` assets.
+        """
         raise NotImplementedError(
             "GEESource.query is scaffolding — Phase 3 PR (see design §8). "
             "Phase 1 ships earthaccess + STAC + CMR; GEE follows once "
@@ -65,4 +73,11 @@ class GEESource(Source):
         )
 
     def auth_status(self) -> AuthStatus:
+        """Report whether the `ee` client can reach Earth Engine.
+
+        Scaffolding — not yet implemented (Phase 3, design §8).
+
+        Raises:
+            NotImplementedError: Always, until the Phase 3 PR lands.
+        """
         raise NotImplementedError("GEESource.auth_status is scaffolding — Phase 3 PR.")

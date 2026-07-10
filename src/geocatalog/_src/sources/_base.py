@@ -7,8 +7,9 @@ endpoint, Google Earth Engine, CMR). It is distinct from a
 `Source` is *external*, queried each time; a `GeoCatalog` is *local*,
 persisted in GeoParquet.
 
-The two come together via ``catalog.ingest(source, query)`` which
-materializes a remote query into local catalog rows. See
+The two come together via ``CatalogBundle.ingest(source, bounds=...)``
+(see `geocatalog._src.bundle`), which materializes a remote query into
+local catalog rows and records a ``QueryRecord`` for provenance. See
 ``docs/design/query-matchup.md`` §4 for the full picture.
 """
 

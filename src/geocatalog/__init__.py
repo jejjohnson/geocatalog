@@ -1,35 +1,46 @@
 """`geocatalog` — spatiotemporal index over geospatial files.
 
-Surface:
+Surface (every public name is available flat at the top level):
 
-- `GeoSlice`: the cross-cutting unit of work — a bbox + interval + CRS +
-  resolution. Catalogs produce them; loaders consume them.
-- `GeoCatalog`: Protocol; one shape across backends.
-- `CatalogRow`: backend-neutral row view yielded by `iter_rows`.
-- `InMemoryGeoCatalog`: GeoDataFrame-backed Phase 1 implementation.
-- `DuckDBGeoCatalog`: SQL-backed Phase 2 implementation (extras-gated
-  via `[duckdb]`).
-- `open_catalog`: factory that picks a backend for a GeoParquet artifact.
-- `build_raster_catalog` / `build_xarray_catalog` / `build_vector_catalog`:
-  builders, the latter two extras-gated.
-- `load_raster` / `load_raster_timeseries` / `load_xarray` / `load_vector`:
-  per-backend loaders that consume a `GeoSlice` and return `GeoTensor`
-  (raster, vector) or `xr.Dataset` (xarray).
-- `query` / `intersect` / `union`: set algebra over catalogs.
-- `to_geoparquet` / `from_geoparquet`: portable artifact round-trip.
-- `CatalogDomain`: adapter so a downstream `SpatialPatcher` (e.g. from
-  `geotoolz.patch`) can iterate a catalog's rows.
+- **Catalogs** — `GeoCatalog` (Protocol), `InMemoryGeoCatalog`,
+  `DuckDBGeoCatalog` (``[duckdb]`` extra), `open_catalog` factory,
+  `CatalogRow`, and the `query` / `intersect` / `union` set algebra.
+- **Types** — `GeoSlice` (bbox + interval + CRS + resolution; catalogs
+  produce them, loaders consume them), `slice_to_window` /
+  `window_to_slice`, and the grid-alignment helpers (`Align`,
+  `divide_evenly`, `is_grid_aligned`, `GridAlignmentWarning`).
+- **Builders / loaders** — `build_raster_catalog` /
+  `build_xarray_catalog` / `build_vector_catalog` and `load_raster` /
+  `load_raster_timeseries` / `load_xarray` / `load_vector` (the
+  xarray / vector pairs are extras-gated).
+- **Persistence** — `to_geoparquet` / `from_geoparquet`,
+  `migrate_geoparquet`, `append_files`, `SCHEMA_VERSION_CURRENT`.
+- **Discovery** — the `Source` Protocol, `SourceRow` carrier,
+  `AuthStatus`, and the adapters `STACSource` / `CMRSource` /
+  `EarthAccessSource` / `GEESource` (extras-gated), plus the STAC
+  conversion trio `from_stac_items` / `from_stac_search` /
+  `to_stac_collection`.
+- **Matchup** — the `matchup` engine, `MatchupRow`, and the spatial
+  (`Intersects`, `IouAtLeast`, `CentroidWithin`, `Contains`) and
+  temporal (`NearestInTime`, `WithinWindow`, `Synchronous`)
+  strategies.
+- **Bundle / staging** — `CatalogBundle` / `QueryRecord` provenance
+  persistence, `stage` / `LocalCache` remote-asset staging, and the
+  `field_for` geopatcher bridge.
+- **Domain bridge** — `CatalogDomain`, so a downstream
+  `SpatialPatcher` (geopatcher) can iterate a catalog's rows.
 
 The hybrid layout exposes the same surface at three paths: flat top
-level (`geocatalog.GeoSlice`), `geocatalog.types.GeoSlice`, and
-`geocatalog.catalog.InMemoryGeoCatalog`. Pick whichever reads best
-where you import.
+level (`geocatalog.GeoSlice`), thematic sub-namespaces
+(`geocatalog.types.GeoSlice`, `geocatalog.sources.STACSource`,
+`geocatalog.matchup.matchup`, ...), and `geocatalog.catalog.*`. Pick
+whichever reads best where you import. Extras-gated names resolve
+lazily — importing `geocatalog` never requires an optional dependency.
 """
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
 
 from loguru import logger as _logger
 
@@ -40,12 +51,27 @@ from geocatalog._src._align import (
     is_grid_aligned,
 )
 from geocatalog._src.base import CatalogRow, CatalogSchemaError, GeoCatalog
+from geocatalog._src.bundle import CatalogBundle, QueryRecord, source_row_to_gdf_row
 from geocatalog._src.domain import CatalogDomain
+from geocatalog._src.factory import open_catalog
 from geocatalog._src.geoslice import (
     PIXEL_PRECISION,
     GeoSlice,
     slice_to_window,
     window_to_slice,
+)
+from geocatalog._src.matchup import (
+    CentroidWithin,
+    Contains,
+    Intersects,
+    IouAtLeast,
+    MatchupRow,
+    NearestInTime,
+    SpatialStrategy,
+    Synchronous,
+    TemporalStrategy,
+    WithinWindow,
+    matchup,
 )
 from geocatalog._src.memory import InMemoryGeoCatalog
 from geocatalog._src.ops import intersect, query, union
@@ -60,6 +86,8 @@ from geocatalog._src.raster import (
     load_raster,
     load_raster_timeseries,
 )
+from geocatalog._src.sources import AuthStatus, Source, SourceRow
+from geocatalog._src.staging import LocalCache, field_for, stage
 from geocatalog._src.streaming import append_files
 
 
@@ -71,6 +99,10 @@ _logger.disable("geocatalog")
 
 if TYPE_CHECKING:
     from geocatalog._src.duckdb_backend import DuckDBGeoCatalog
+    from geocatalog._src.sources.cmr import CMRSource
+    from geocatalog._src.sources.earthaccess import EarthAccessSource
+    from geocatalog._src.sources.gee import GEESource
+    from geocatalog._src.sources.stac import STACSource
     from geocatalog._src.stac import (
         from_stac_items,
         from_stac_search,
@@ -89,19 +121,40 @@ __all__ = [
     "PIXEL_PRECISION",
     "SCHEMA_VERSION_CURRENT",
     "Align",
+    "AuthStatus",
+    "CMRSource",
+    "CatalogBundle",
     "CatalogDomain",
     "CatalogRow",
     "CatalogSchemaError",
+    "CentroidWithin",
+    "Contains",
     "DuckDBGeoCatalog",
+    "EarthAccessSource",
+    "GEESource",
     "GeoCatalog",
     "GeoSlice",
     "GridAlignmentWarning",
     "InMemoryGeoCatalog",
+    "Intersects",
+    "IouAtLeast",
+    "LocalCache",
+    "MatchupRow",
+    "NearestInTime",
+    "QueryRecord",
+    "STACSource",
+    "Source",
+    "SourceRow",
+    "SpatialStrategy",
+    "Synchronous",
+    "TemporalStrategy",
+    "WithinWindow",
     "append_files",
     "build_raster_catalog",
     "build_vector_catalog",
     "build_xarray_catalog",
     "divide_evenly",
+    "field_for",
     "from_geoparquet",
     "from_stac_items",
     "from_stac_search",
@@ -111,10 +164,13 @@ __all__ = [
     "load_raster_timeseries",
     "load_vector",
     "load_xarray",
+    "matchup",
     "migrate_geoparquet",
     "open_catalog",
     "query",
     "slice_to_window",
+    "source_row_to_gdf_row",
+    "stage",
     "to_geoparquet",
     "to_stac_collection",
     "union",
@@ -122,137 +178,43 @@ __all__ = [
 ]
 
 
-_BACKEND_T = Literal["raster", "xarray", "vector"]
-
-
-def open_catalog(
-    source: str | Path,
-    *,
-    backend: _BACKEND_T | None = None,
-    engine: Literal["auto", "memory", "duckdb"] = "auto",
-    crs: Any | None = None,
-    storage_options: dict[str, Any] | None = None,
-) -> GeoCatalog:
-    """Open a GeoParquet artifact as a `GeoCatalog`.
-
-    The factory picks an engine. ``"auto"`` prefers the DuckDB backend
-    (lazy, scales) when the ``[duckdb]`` extra is installed; otherwise it
-    falls back to the in-memory backend via `from_geoparquet`. Pass
-    ``engine="memory"`` to force the eager path even with DuckDB present.
-
-    The artifact's stored backend tag (the ``_backend`` column written
-    by `to_geoparquet`) is honoured by default — pass ``backend=...``
-    only to override a wrong tag or to tag an externally produced
-    artifact that lacks the column. Forcing a default would silently
-    miscategorise xarray / vector catalogs and break loader dispatch.
-
-    Args:
-        source: Path or URI to a GeoParquet file. A directory of shards
-            (``shards/``) or a glob (``shards/*.parquet``) is read as one
-            virtual table by the DuckDB engine; the in-memory engine
-            requires a single file.
-        backend: Loader dispatch tag (``"raster"`` / ``"xarray"`` /
-            ``"vector"``). ``None`` reads the ``_backend`` column from
-            the artifact (default ``"raster"`` if missing).
-        engine: ``"auto"`` (DuckDB if available, else memory),
-            ``"memory"`` (force `from_geoparquet`), or ``"duckdb"``
-            (force `DuckDBGeoCatalog.open`; raises if the extra is not
-            installed).
-        crs: Optional CRS override; only consulted by the DuckDB engine
-            when the artifact doesn't carry one.
-        storage_options: Options forwarded to fsspec when reading cloud
-            URIs through the in-memory engine.
-
-    Returns:
-        A `GeoCatalog` over ``source``. The concrete class is either
-        `DuckDBGeoCatalog` or `InMemoryGeoCatalog` depending on the
-        resolved engine.
-
-    Raises:
-        ImportError: ``engine="duckdb"`` with the extra missing.
-    """
-    if engine == "memory":
-        return _memory_engine(source, backend, storage_options=storage_options)
-    if engine == "duckdb":
-        from geocatalog._src.duckdb_backend import DuckDBGeoCatalog
-
-        return DuckDBGeoCatalog.open(
-            source,
-            backend=backend,
-            crs=crs,
-            storage_options=storage_options,
-        )
-    # engine == "auto"
-    if storage_options is not None:
-        return _memory_engine(source, backend, storage_options=storage_options)
-    try:
-        from geocatalog._src.duckdb_backend import DuckDBGeoCatalog
-    except ImportError:
-        return _memory_engine(source, backend, storage_options=storage_options)
-    try:
-        return DuckDBGeoCatalog.open(
-            source,
-            backend=backend,
-            crs=crs,
-            storage_options=storage_options,
-        )
-    except ImportError:
-        return _memory_engine(source, backend, storage_options=storage_options)
-
-
-def _memory_engine(
-    source: str | Path,
-    backend: _BACKEND_T | None,
-    *,
-    storage_options: dict[str, Any] | None = None,
-) -> InMemoryGeoCatalog:
-    """Open ``source`` as an `InMemoryGeoCatalog`, applying a backend override.
-
-    Constructs a fresh catalog rather than mutating ``cat.backend`` so
-    the override flows through `InMemoryGeoCatalog.__init__`'s validation.
-    """
-    cat = from_geoparquet(source, storage_options=storage_options)
-    if backend is None or backend == cat.backend:
-        return cat
-    return InMemoryGeoCatalog(cat.gdf, backend=backend)
-
-
-_LAZY_ATTRS = {
-    "build_xarray_catalog": ("geocatalog._src.xarray_backend",),
-    "load_xarray": ("geocatalog._src.xarray_backend",),
-    "build_vector_catalog": ("geocatalog._src.vector",),
-    "load_vector": ("geocatalog._src.vector",),
-    "DuckDBGeoCatalog": ("geocatalog._src.duckdb_backend",),
-    "from_stac_items": ("geocatalog._src.stac",),
-    "from_stac_search": ("geocatalog._src.stac",),
-    "to_stac_collection": ("geocatalog._src.stac",),
+# Extras-gated names resolve lazily: mapping of public name to
+# (module, extra) — `extra` is the install hint used in the error
+# message, or None when the module has no dedicated extra.
+_LAZY_ATTRS: dict[str, tuple[str, str | None]] = {
+    "build_xarray_catalog": ("geocatalog._src.xarray_backend", "xarray-raster"),
+    "load_xarray": ("geocatalog._src.xarray_backend", "xarray-raster"),
+    "build_vector_catalog": ("geocatalog._src.vector", None),
+    "load_vector": ("geocatalog._src.vector", None),
+    "DuckDBGeoCatalog": ("geocatalog._src.duckdb_backend", "duckdb"),
+    "from_stac_items": ("geocatalog._src.stac", "stac"),
+    "from_stac_search": ("geocatalog._src.stac", "stac"),
+    "to_stac_collection": ("geocatalog._src.stac", "stac"),
+    "CMRSource": ("geocatalog._src.sources.cmr", None),
+    "EarthAccessSource": ("geocatalog._src.sources.earthaccess", "earthaccess"),
+    "STACSource": ("geocatalog._src.sources.stac", "stac"),
+    "GEESource": ("geocatalog._src.sources.gee", "gee"),
 }
 
 
 def __getattr__(name: str) -> Any:
-    """Lazy import for the extras-gated backends.
+    """Lazy import for the extras-gated backends and source adapters.
 
     Importing `geocatalog` at top level should not fail just because an
-    optional dep (`xarray`, `duckdb`) is missing. Resolving e.g.
-    `load_xarray` or `DuckDBGeoCatalog` finally triggers the import and
-    raises a friendly `ImportError` if the corresponding extra isn't
-    installed.
+    optional dep (`xarray`, `duckdb`, `pystac-client`, ...) is missing.
+    Resolving e.g. `load_xarray` or `STACSource` finally triggers the
+    import and raises a friendly `ImportError` naming the extra to
+    install if the corresponding dependency isn't there.
     """
     if name in _LAZY_ATTRS:
         import importlib
 
-        module_name = _LAZY_ATTRS[name][0]
+        module_name, extra = _LAZY_ATTRS[name]
         try:
             mod = importlib.import_module(module_name)
         except ImportError as exc:
-            if "xarray" in module_name:
-                extra = "xarray-raster"
-            elif "duckdb" in module_name:
-                extra = "duckdb"
-            elif "stac" in module_name:
-                extra = "stac"
-            else:
-                extra = "vector"
+            if extra is None:
+                raise
             raise ImportError(
                 f"`geocatalog.{name}` requires the [{extra}] extra; "
                 f"install via `pip install 'geocatalog[{extra}]'`."

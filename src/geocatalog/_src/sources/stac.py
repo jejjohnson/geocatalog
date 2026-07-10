@@ -19,6 +19,10 @@ import pandas as pd
 import shapely.geometry
 from loguru import logger
 
+from geocatalog._src._timeutil import (
+    to_rfc3339 as _to_iso,
+    to_utc_ts as _to_utc_timestamp,
+)
 from geocatalog._src.sources._base import AuthStatus, Bounds, Source, SourceRow
 from geocatalog._src.sources._extras import _missing_extra
 
@@ -228,29 +232,14 @@ def _pystac_client_version() -> str:
 
 
 def _interval_to_stac_datetime(interval: pd.Interval) -> str:
-    """`pd.Interval` → STAC `datetime` string (``"start/end"`` ISO 8601)."""
-    start = pd.Timestamp(interval.left)
-    end = pd.Timestamp(interval.right)
-    # STAC expects timezone-aware ISO 8601 with `Z` for UTC.
-    return f"{_to_iso(start)}/{_to_iso(end)}"
+    """`pd.Interval` → STAC `datetime` string (``"start/end"`` ISO 8601).
 
-
-def _to_utc_timestamp(value: Any) -> pd.Timestamp:
-    """Coerce any datetime-like to a UTC-aware ``pd.Timestamp``.
-
-    Naive inputs are assumed UTC (the catalog's stored time-axis
-    contract). Tz-aware inputs in other zones are converted.
+    STAC expects timezone-aware ISO 8601 with ``Z`` for UTC; the
+    UTC coercion / ``Z`` serialization live in
+    `geocatalog._src._timeutil` (imported here as ``_to_iso`` /
+    ``_to_utc_timestamp``).
     """
-    ts = pd.Timestamp(value)
-    return ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
-
-
-def _to_iso(ts: pd.Timestamp) -> str:
-    """Naive timestamps are assumed UTC; everything serialized with ``Z``."""
-    ts = ts.tz_localize("UTC") if ts.tzinfo is None else ts.tz_convert("UTC")
-    # `.isoformat()` on a UTC-aware Timestamp yields ``...+00:00``; STAC
-    # canonical form uses ``Z`` so we normalize.
-    return ts.isoformat().replace("+00:00", "Z")
+    return f"{_to_iso(interval.left)}/{_to_iso(interval.right)}"
 
 
 def _item_to_source_row(

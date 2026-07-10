@@ -93,10 +93,11 @@ gee = ["earthengine-api>=0.1.380"]
 # into a `geopatcher.SpatialPatcher` without manual `RasterField`
 # construction. See `docs/design/query-matchup.md` §8 (Phase 4).
 # Pinned to a specific commit so installs are reproducible while
-# geopatcher is pre-PyPI. Bump intentionally when picking up new
+# geopatcher is pre-PyPI (pinned at the 0.0.5 release commit).
+# Bump intentionally when picking up new
 # features. Once geopatcher publishes, swap to `geopatcher>=X.Y`.
 patch = [
-    "geopatcher @ git+https://github.com/jejjohnson/geopatcher.git@1b5a8b73acce0b4860d5030bc589253eb2b79dc1",
+    "geopatcher @ git+https://github.com/jejjohnson/geopatcher.git@4950b85a57bf5d6ce49a6ce451d190fd69edd0d2",
 ]
 sources-all = [
     "earthaccess>=0.10",
@@ -119,7 +120,7 @@ full = [
     "earthengine-api>=0.1.380",
     # geopatcher bridge — exposes `geocatalog.staging.field_for`. Pinned
     # via direct URL until the first PyPI release; see `[patch]` extra.
-    "geopatcher @ git+https://github.com/jejjohnson/geopatcher.git@1b5a8b73acce0b4860d5030bc589253eb2b79dc1",
+    "geopatcher @ git+https://github.com/jejjohnson/geopatcher.git@4950b85a57bf5d6ce49a6ce451d190fd69edd0d2",
     # Cloud/object-storage I/O — keeps `[full]` aligned with `[fsspec]`
     # + `[obstore]` so a single install lights up s3://, gs://, az://,
     # https://, and hf:// URIs end-to-end.
@@ -182,7 +183,7 @@ docs = [
 # users follow the PEP 508 git URL pinned in `[project.optional-dependencies]
 # patch`, so both tooling paths resolve to the same source until the
 # first PyPI release lands. Pinned to the same revision for parity.
-geopatcher = { git = "https://github.com/jejjohnson/geopatcher", rev = "1b5a8b73acce0b4860d5030bc589253eb2b79dc1" }
+geopatcher = { git = "https://github.com/jejjohnson/geopatcher", rev = "4950b85a57bf5d6ce49a6ce451d190fd69edd0d2" }
 
 [build-system]
 requires = ["hatchling"]
@@ -251,7 +252,7 @@ python_files = ["test_*.py", "bench_*.py"]
 # skip it (otherwise every CI run would pay the warmup + repeated-call
 # cost). Invoke explicitly with
 # ``uv run pytest tests/bench --benchmark-only``.
-addopts = "--cov=src/geocatalog --cov-report=term-missing --cov-report=xml:coverage.xml --ignore=tests/bench -m 'not live'"
+addopts = "--cov=src/geocatalog --cov-report=term-missing --cov-report=xml:coverage.xml --ignore=tests/bench -m 'not live' --strict-markers"
 markers = [
     # Tests that hit real external services (Planetary Computer, NASA
     # CMR, etc.). Skipped by default — `addopts` filters them out — so

@@ -41,9 +41,13 @@ from loguru import logger as log
 if TYPE_CHECKING:
     import duckdb as duckdb_mod
 
-from geocatalog._src.base import CatalogRow
+from geocatalog._src.base import RESERVED_COLUMNS, CatalogRow
 from geocatalog._src.geoslice import GeoSlice
-from geocatalog._src.memory import InMemoryGeoCatalog, _coerce_interval
+from geocatalog._src.memory import (
+    InMemoryGeoCatalog,
+    _coerce_interval,
+    _reproject_bounds,
+)
 from geocatalog._src.retry import retry_transient_io
 
 
@@ -542,12 +546,19 @@ class DuckDBGeoCatalog:
             q_crs = crs
             q_interval = _coerce_interval(time) if time is not None else None
 
+        # The relation API's `.filter()` takes a SQL string, so these
+        # predicates are interpolated rather than bound as parameters.
+        # Every interpolated value is force-coerced to a safe literal
+        # first (float / `pd.Timestamp.isoformat`) — never interpolate
+        # a raw user string here.
         where: list[str] = []
         if q_bounds is not None:
-            xmin, ymin, xmax, ymax = _reproject_bounds(q_bounds, q_crs, self.crs)
+            xmin, ymin, xmax, ymax = (
+                float(v) for v in _reproject_bounds(q_bounds, q_crs, self.crs)
+            )
             where.append(
                 f"ST_Intersects(geometry, "
-                f"ST_MakeEnvelope({xmin}, {ymin}, {xmax}, {ymax}))"
+                f"ST_MakeEnvelope({xmin!r}, {ymin!r}, {xmax!r}, {ymax!r}))"
             )
         if q_interval is not None:
             t_lo = pd.Timestamp(q_interval.left).isoformat()
@@ -681,13 +692,12 @@ class DuckDBGeoCatalog:
         geoms = _decode_geometry_column(df["geometry"])
         starts = pd.to_datetime(df["start_time"])
         ends = pd.to_datetime(df["end_time"])
-        reserved = {"geometry", "filepath", "start_time", "end_time", "bbox"}
         # `_backend`, `_schema_version` and any other underscore-prefixed
         # column belong to the on-disk schema, not the user-visible row
         # metadata. Filtering them keeps `extras` clean for downstream
         # loaders that introspect it.
         extra_cols = [
-            c for c in df.columns if c not in reserved and not c.startswith("_")
+            c for c in df.columns if c not in RESERVED_COLUMNS and not c.startswith("_")
         ]
         for i in range(len(df)):
             extras = {c: df[c].iloc[i] for c in extra_cols}
@@ -929,6 +939,7 @@ def _read_geoparquet_crs(source: str | Path, *, default: str) -> Any:
     """
     import json
 
+    import pyarrow as pa
     import pyarrow.parquet as pq
 
     path = Path(source)
@@ -941,7 +952,17 @@ def _read_geoparquet_crs(source: str | Path, *, default: str) -> Any:
         return default
     try:
         md = pq.read_metadata(path).metadata or {}
-    except Exception:
+    except (OSError, pa.ArrowInvalid) as exc:
+        # A corrupt or unreadable shard shouldn't silently masquerade as
+        # EPSG:4326 without a trace — surface the reason at WARNING so
+        # operators can tell "no geo metadata" apart from "broken file".
+        log.warning(
+            "duckdb backend: could not read Parquet metadata from {!r} "
+            "({}); falling back to {}",
+            str(path),
+            exc,
+            default,
+        )
         return default
     geo = md.get(b"geo")
     if geo is None:
@@ -1193,24 +1214,3 @@ def _decode_geometry_column(col: pd.Series) -> list[Any]:
         # Last-ditch: try shapely's parser.
         out.append(shapely.from_wkb(val))
     return out
-
-
-def _reproject_bounds(
-    bounds: tuple[float, float, float, float],
-    src_crs: Any | None,
-    dst_crs: pyproj.CRS,
-) -> tuple[float, float, float, float]:
-    """Reproject AOI bounds into ``dst_crs``, no-op when CRSs match.
-
-    Mirrors `geocatalog._src.memory._reproject_bounds` — kept
-    local so the DuckDB module doesn't reach into the InMemory module's
-    private surface. ``src_crs=None`` is treated as "already in
-    catalog CRS"; the bbox passes through unchanged.
-    """
-    if src_crs is None:
-        return bounds
-    src = pyproj.CRS.from_user_input(src_crs)
-    if src == dst_crs:
-        return bounds
-    transformer = pyproj.Transformer.from_crs(src, dst_crs, always_xy=True)
-    return transformer.transform_bounds(*bounds)  # type: ignore[return-value]
