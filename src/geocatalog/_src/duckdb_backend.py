@@ -546,12 +546,19 @@ class DuckDBGeoCatalog:
             q_crs = crs
             q_interval = _coerce_interval(time) if time is not None else None
 
+        # The relation API's `.filter()` takes a SQL string, so these
+        # predicates are interpolated rather than bound as parameters.
+        # Every interpolated value is force-coerced to a safe literal
+        # first (float / `pd.Timestamp.isoformat`) — never interpolate
+        # a raw user string here.
         where: list[str] = []
         if q_bounds is not None:
-            xmin, ymin, xmax, ymax = _reproject_bounds(q_bounds, q_crs, self.crs)
+            xmin, ymin, xmax, ymax = (
+                float(v) for v in _reproject_bounds(q_bounds, q_crs, self.crs)
+            )
             where.append(
                 f"ST_Intersects(geometry, "
-                f"ST_MakeEnvelope({xmin}, {ymin}, {xmax}, {ymax}))"
+                f"ST_MakeEnvelope({xmin!r}, {ymin!r}, {xmax!r}, {ymax!r}))"
             )
         if q_interval is not None:
             t_lo = pd.Timestamp(q_interval.left).isoformat()
@@ -932,6 +939,7 @@ def _read_geoparquet_crs(source: str | Path, *, default: str) -> Any:
     """
     import json
 
+    import pyarrow as pa
     import pyarrow.parquet as pq
 
     path = Path(source)
@@ -944,7 +952,17 @@ def _read_geoparquet_crs(source: str | Path, *, default: str) -> Any:
         return default
     try:
         md = pq.read_metadata(path).metadata or {}
-    except Exception:
+    except (OSError, pa.ArrowInvalid) as exc:
+        # A corrupt or unreadable shard shouldn't silently masquerade as
+        # EPSG:4326 without a trace — surface the reason at WARNING so
+        # operators can tell "no geo metadata" apart from "broken file".
+        log.warning(
+            "duckdb backend: could not read Parquet metadata from {!r} "
+            "({}); falling back to {}",
+            str(path),
+            exc,
+            default,
+        )
         return default
     geo = md.get(b"geo")
     if geo is None:

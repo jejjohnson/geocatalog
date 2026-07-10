@@ -48,6 +48,12 @@ _LEGACY_UNVERSIONED: int = 0
 # ``_MIGRATIONS[v_artifact] ∘ … ∘ _MIGRATIONS[v_current - 1]`` brings an
 # old artifact up to the current version. Empty today (current schema
 # is v0); populate when shipping v1.
+#
+# Input shape contract for migration authors: migrations run inside
+# `from_geoparquet` AFTER the internal `_backend` / `_schema_version`
+# columns are dropped and BEFORE the (start_time, end_time)
+# IntervalIndex is rebuilt — a migration sees plain `start_time` /
+# `end_time` columns, never the interval index.
 _MIGRATIONS: dict[int, Callable[[gpd.GeoDataFrame], gpd.GeoDataFrame]] = {}
 
 

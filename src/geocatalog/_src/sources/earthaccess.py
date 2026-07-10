@@ -241,7 +241,15 @@ def _granule_to_source_row(
     assets: dict[str, str] = {}
     try:
         links = list(granule.data_links())
-    except Exception:
+    except (AttributeError, KeyError, TypeError, ValueError) as exc:
+        # Malformed granule metadata shouldn't kill the whole query, but
+        # an asset-less row is surprising downstream — say why it happened.
+        logger.warning(
+            "earthaccess: could not extract data links for granule {!r} "
+            "({}); row will carry no assets",
+            granule_ur,
+            exc,
+        )
         links = []
     for link in links:
         key = _asset_key_from_url(link)
