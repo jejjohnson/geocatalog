@@ -251,7 +251,7 @@ python_files = ["test_*.py", "bench_*.py"]
 # skip it (otherwise every CI run would pay the warmup + repeated-call
 # cost). Invoke explicitly with
 # ``uv run pytest tests/bench --benchmark-only``.
-addopts = "--cov=src/geocatalog --cov-report=term-missing --cov-report=xml:coverage.xml --ignore=tests/bench -m 'not live'"
+addopts = "--cov=src/geocatalog --cov-report=term-missing --cov-report=xml:coverage.xml --ignore=tests/bench -m 'not live' --strict-markers"
 markers = [
     # Tests that hit real external services (Planetary Computer, NASA
     # CMR, etc.). Skipped by default — `addopts` filters them out — so

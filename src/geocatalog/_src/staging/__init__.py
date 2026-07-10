@@ -6,20 +6,15 @@ into a local cache and rewrites a catalog to point at those local
 copies, ready to be opened by `load_raster` / `load_vector` /
 `load_xarray`.
 
-Current scaffolding (this PR):
+Implemented surface (see ``docs/design/query-matchup.md`` §4.7):
 
-* `LocalCache` — config carrier (root, ttl). Body is a plain
-  dataclass; the documented default-root resolution lands in
-  Phase 5.
-* `stage` — orchestrator entry point. Raises `NotImplementedError`
-  until Phase 5.
-
-Planned modules (Phase 5, see ``docs/design/query-matchup.md`` §4.7):
-
-* `staging/cache.py` — fsspec-backed cache, keyed by ``(uri, asset)``.
-* `staging/download.py` — parallel fetch + retry / backoff (shared
-  with the raster loaders' machinery from PR #51).
-* `staging/gee.py` — `ee.Image.getDownloadURL` materialization.
+* `stage` — orchestrator entry point: fetches each row's remote
+  assets into the cache (parallel, with retry) and returns a catalog
+  whose rows point at the local copies.
+* `LocalCache` — cache configuration carrier (root directory, TTL);
+  content is keyed by ``(uri, asset)``.
+* `field_for` — bridge a staged catalog to a `geopatcher.Field`
+  (soft-imports geopatcher; requires the ``[patch]`` extra).
 """
 
 from __future__ import annotations

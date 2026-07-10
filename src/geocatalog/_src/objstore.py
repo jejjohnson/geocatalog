@@ -9,7 +9,7 @@ Python session.
 
 Surfaces:
 
-- :func:`get_obstore` — return a pooled :class:`obstore.store.ObjectStore`
+- `get_obstore` — return a pooled :class:`obstore.store.ObjectStore`
   for a URI.
 - :func:`get_range_bytes` — async helper that resolves a URI to its
   pool entry and fetches a byte range. Not currently called by the
@@ -17,7 +17,7 @@ Surfaces:
   bounds-extraction path — but exposed for downstream packages
   (``geopatcher``'s upcoming ``ObstoreCogField`` is the first
   consumer) and for users who want to drive header prefetch directly.
-- :func:`clear_obstore_pool` — explicit pool teardown for long-lived
+- `clear_obstore_pool` — explicit pool teardown for long-lived
   processes (notebooks).
 - :func:`set_obstore_pool_maxsize` — LRU cap.
 
@@ -90,7 +90,7 @@ def _pool_key(uri: str) -> tuple[str, str, str | None, str | None]:
 
 
 def _build_store(uri: str, storage_options: dict[str, Any] | None) -> ObjectStore:
-    """Construct a fresh :class:`ObjectStore` for ``uri``.
+    """Construct a fresh `ObjectStore` for ``uri``.
 
     Dispatches on URI scheme to the corresponding obstore backend
     (S3, GCS, Azure, HTTP). Storage options are passed through; nothing
@@ -116,7 +116,14 @@ def _build_store(uri: str, storage_options: dict[str, Any] | None) -> ObjectStor
     if scheme in ("gs", "gcs"):
         return GCSStore(bucket, **options)
     if scheme in ("az", "azure", "abfs"):
-        return AzureStore(bucket, **options)
+        # Azure URIs are ``az://account/container/blob`` — the container
+        # name is the FIRST path segment, not the netloc, and obstore's
+        # ``AzureStore(container, ...)`` constructor expects the
+        # container name. Use ``from_url`` so obstore's parser handles
+        # the account/container/blob split correctly; per-request reads
+        # then use the blob key (the rest of the path) — see
+        # `_object_key` below.
+        return AzureStore.from_url(uri, **options)
     if scheme in ("http", "https"):
         # HTTPStore takes the full origin (scheme://host[:port]); the
         # path of the URI is the per-request key.
@@ -133,7 +140,7 @@ def get_obstore(
     *,
     storage_options: dict[str, Any] | None = None,
 ) -> ObjectStore:
-    """Return the pooled :class:`ObjectStore` for ``uri``.
+    """Return the pooled `ObjectStore` for ``uri``.
 
     Calls share clients across the process when the
     ``(scheme, bucket, region, endpoint)`` key matches. The first call
@@ -147,7 +154,7 @@ def get_obstore(
         storage_options: Passed through to the underlying obstore
             constructor on the *first* call for a given key; subsequent
             calls ignore it (the client is already built). For
-            per-call overrides, call :func:`clear_obstore_pool` first.
+            per-call overrides, call `clear_obstore_pool` first.
 
     Raises:
         ImportError: ``[obstore]`` extra not installed.
@@ -167,6 +174,24 @@ def get_obstore(
         return store
 
 
+def _object_key(uri: str) -> str:
+    """Return the key inside the pooled store for ``uri``.
+
+    Most schemes: the path component minus the leading ``/``. Azure
+    is the exception — the first path segment is the container name
+    (already baked into the pooled `AzureStore` instance) and the
+    rest is the blob key.
+    """
+    parsed = urlsplit(uri)
+    scheme = parsed.scheme.lower()
+    path = parsed.path.lstrip("/")
+    if scheme in ("az", "azure", "abfs"):
+        # Drop the container segment; what remains is the blob key.
+        _, _, blob = path.partition("/")
+        return blob
+    return path
+
+
 async def get_range_bytes(
     uri: str,
     start: int,
@@ -176,7 +201,7 @@ async def get_range_bytes(
 ) -> bytes:
     """Fetch ``length`` bytes starting at ``start`` from ``uri``.
 
-    Async wrapper around :meth:`ObjectStore.get_range_async`. Resolves
+    Async wrapper around `ObjectStore.get_range_async`. Resolves
     the URI's path component to the obstore key (the bucket+region is
     in the pool entry; the path is the per-request key).
 
@@ -184,15 +209,14 @@ async def get_range_bytes(
         uri: Cloud URI of the object to read.
         start: Byte offset of the read.
         length: Number of bytes to read.
-        storage_options: Forwarded to :func:`get_obstore` on the first
+        storage_options: Forwarded to `get_obstore` on the first
             call for a given pool key.
 
     Returns:
         The requested byte range as a ``bytes`` object.
     """
     store = get_obstore(uri, storage_options=storage_options)
-    path = urlsplit(uri).path.lstrip("/")
-    blob = await store.get_range_async(path, start=start, length=length)
+    blob = await store.get_range_async(_object_key(uri), start=start, length=length)
     return bytes(blob)
 
 
