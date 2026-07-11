@@ -43,12 +43,12 @@ def fake_duckdb(monkeypatch: pytest.MonkeyPatch) -> _FakeConnection:
     monkeypatch.setattr(
         duckdb_backend,
         "_read_geoparquet_crs",
-        lambda source, *, default: default,
+        lambda source, *, default, strict=False: default,
     )
     monkeypatch.setattr(
         duckdb_backend,
         "_read_backend_tag",
-        lambda con, source, *, default, partitioned=False: default,
+        lambda con, source, *, default, partitioned=False, strict=False: default,
     )
     monkeypatch.setattr(
         duckdb_backend,

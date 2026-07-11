@@ -27,6 +27,7 @@ def open_catalog(
     engine: Literal["auto", "memory", "duckdb"] = "auto",
     crs: Any | None = None,
     storage_options: dict[str, Any] | None = None,
+    strict: bool = False,
 ) -> GeoCatalog:
     """Open a GeoParquet artifact as a `GeoCatalog`.
 
@@ -57,6 +58,11 @@ def open_catalog(
             when the artifact doesn't carry one.
         storage_options: Options forwarded to fsspec when reading cloud
             URIs through the in-memory engine.
+        strict: If ``True``, raise `CatalogMetadataError` instead of
+            warning-and-falling-back when the artifact is missing the
+            ``_backend`` column (and ``backend=`` was not passed) or —
+            on the DuckDB engine — its ``geo`` metadata is unreadable
+            (and ``crs=`` was not passed).
 
     Returns:
         A `GeoCatalog` over ``source``. The concrete class is either
@@ -67,7 +73,9 @@ def open_catalog(
         ImportError: ``engine="duckdb"`` with the extra missing.
     """
     if engine == "memory":
-        return _memory_engine(source, backend, storage_options=storage_options)
+        return _memory_engine(
+            source, backend, storage_options=storage_options, strict=strict
+        )
     if engine == "duckdb":
         from geocatalog._src.duckdb_backend import DuckDBGeoCatalog
 
@@ -76,23 +84,31 @@ def open_catalog(
             backend=backend,
             crs=crs,
             storage_options=storage_options,
+            strict=strict,
         )
     # engine == "auto"
     if storage_options is not None:
-        return _memory_engine(source, backend, storage_options=storage_options)
+        return _memory_engine(
+            source, backend, storage_options=storage_options, strict=strict
+        )
     try:
         from geocatalog._src.duckdb_backend import DuckDBGeoCatalog
     except ImportError:
-        return _memory_engine(source, backend, storage_options=storage_options)
+        return _memory_engine(
+            source, backend, storage_options=storage_options, strict=strict
+        )
     try:
         return DuckDBGeoCatalog.open(
             source,
             backend=backend,
             crs=crs,
             storage_options=storage_options,
+            strict=strict,
         )
     except ImportError:
-        return _memory_engine(source, backend, storage_options=storage_options)
+        return _memory_engine(
+            source, backend, storage_options=storage_options, strict=strict
+        )
 
 
 def _memory_engine(
@@ -100,13 +116,14 @@ def _memory_engine(
     backend: _BACKEND_T | None,
     *,
     storage_options: dict[str, Any] | None = None,
+    strict: bool = False,
 ) -> InMemoryGeoCatalog:
     """Open ``source`` as an `InMemoryGeoCatalog`, applying a backend override.
 
-    Constructs a fresh catalog rather than mutating ``cat.backend`` so
-    the override flows through `InMemoryGeoCatalog.__init__`'s validation.
+    The override is forwarded into `from_geoparquet` so an explicit
+    ``backend=`` skips tag recovery entirely — no missing-column
+    warning, no strict-mode raise.
     """
-    cat = from_geoparquet(source, storage_options=storage_options)
-    if backend is None or backend == cat.backend:
-        return cat
-    return InMemoryGeoCatalog(cat.gdf, backend=backend)
+    return from_geoparquet(
+        source, backend=backend, strict=strict, storage_options=storage_options
+    )

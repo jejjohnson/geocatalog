@@ -892,3 +892,73 @@ class TestRegression:
         to_geoparquet(_mem_two_tiles(), path)
         duck = open_catalog(path, engine="duckdb")
         assert len(duck) == 2
+
+
+class TestIterRowsStreaming:
+    """`iter_rows` streams in Arrow batches (gh #4) — no full `.df()`."""
+
+    def test_parity_with_previous_behaviour(self, parquet_two_tiles: Path) -> None:
+        cat = DuckDBGeoCatalog.open(parquet_two_tiles)
+        rows = list(cat.iter_rows())
+        assert [r.filepath for r in rows] == ["A.tif", "B.tif"]
+        assert [r.geometry.bounds for r in rows] == [
+            (0.0, 0.0, 100.0, 100.0),
+            (200.0, 0.0, 300.0, 100.0),
+        ]
+        assert all(r.interval.closed == "both" for r in rows)
+        assert all("_backend" not in r.extras for r in rows)
+
+    def test_batches_are_consumed_incrementally(
+        self, parquet_two_tiles: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cat = DuckDBGeoCatalog.open(parquet_two_tiles)
+        batches: list[int] = []
+        original = DuckDBGeoCatalog._arrow_reader
+
+        def counting(self: DuckDBGeoCatalog, batch_size: int):
+            for batch in original(self, batch_size):
+                batches.append(batch.num_rows)
+                yield batch
+
+        monkeypatch.setattr(DuckDBGeoCatalog, "_arrow_reader", counting)
+        it = cat.iter_rows(batch_size=1)
+        first = next(it)
+        # Only the first batch has been pulled from the reader so far.
+        assert batches == [1]
+        assert first.filepath == "A.tif"
+        rest = list(it)
+        assert len(rest) == 1
+        assert batches == [1, 1]
+
+    def test_relation_df_not_called(
+        self, parquet_two_tiles: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cat = DuckDBGeoCatalog.open(parquet_two_tiles)
+        relation = cat.relation
+
+        def boom() -> None:  # pragma: no cover - failure path
+            raise AssertionError("iter_rows must not materialise via .df()")
+
+        monkeypatch.setattr(type(relation), "df", lambda self: boom(), raising=False)
+        assert len(list(cat.iter_rows())) == 2
+
+    def test_empty_relation(self, parquet_two_tiles: Path) -> None:
+        cat = DuckDBGeoCatalog.open(parquet_two_tiles)
+        empty = cat.query(
+            GeoSlice(
+                bounds=(1_000.0, 1_000.0, 1_100.0, 1_100.0),
+                interval=pd.Interval(
+                    pd.Timestamp("2030-01-01"),
+                    pd.Timestamp("2030-01-02"),
+                    closed="both",
+                ),
+                resolution=(10.0, 10.0),
+                crs="EPSG:32629",
+            )
+        )
+        assert list(empty.iter_rows()) == []
+
+    def test_rejects_nonpositive_batch_size(self, parquet_two_tiles: Path) -> None:
+        cat = DuckDBGeoCatalog.open(parquet_two_tiles)
+        with pytest.raises(ValueError, match="batch_size"):
+            next(cat.iter_rows(batch_size=0))

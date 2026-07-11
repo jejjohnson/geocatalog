@@ -221,3 +221,83 @@ class TestLoadRasterTimeseries:
         serial = load_raster_timeseries(catalog, sl, n_workers=1)
         concurrent = load_raster_timeseries(catalog, sl, n_workers=2)
         np.testing.assert_array_equal(serial.values, concurrent.values)
+
+
+class TestLoadRasterConcurrentOpen:
+    """The file-open phase runs in a thread pool (gh #3)."""
+
+    @staticmethod
+    def _four_tile_setup(utm29_tile_factory):
+        paths = [
+            utm29_tile_factory((500_000, 4_000_000, 500_320, 4_000_320), "20240115"),
+            utm29_tile_factory((500_320, 4_000_000, 500_640, 4_000_320), "20240115"),
+            utm29_tile_factory((500_000, 4_000_320, 500_320, 4_000_640), "20240115"),
+            utm29_tile_factory((500_320, 4_000_320, 500_640, 4_000_640), "20240115"),
+        ]
+        catalog = build_raster_catalog(paths, filename_regex=REGEX)
+        sl = GeoSlice(
+            bounds=(500_000, 4_000_000, 500_640, 4_000_640),
+            interval=pd.Interval(
+                pd.Timestamp("2024-01-01"),
+                pd.Timestamp("2024-01-31"),
+                closed="both",
+            ),
+            resolution=(10.0, 10.0),
+            crs="EPSG:32629",
+        )
+        return catalog, sl
+
+    def test_parallel_matches_serial(self, utm29_tile_factory) -> None:
+        catalog, sl = self._four_tile_setup(utm29_tile_factory)
+        serial = load_raster(catalog, sl, max_open_workers=1)
+        parallel = load_raster(catalog, sl, max_open_workers=8)
+        np.testing.assert_array_equal(serial.values, parallel.values)
+        assert serial.transform == parallel.transform
+
+    def test_opens_actually_run_concurrently(
+        self, utm29_tile_factory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        catalog, sl = self._four_tile_setup(utm29_tile_factory)
+        seen_threads: set[int] = set()
+        original_open = raster_module.rasterio.open
+
+        def tracking_open(*args, **kwargs):
+            seen_threads.add(threading.get_ident())
+            return original_open(*args, **kwargs)
+
+        monkeypatch.setattr(raster_module.rasterio, "open", tracking_open)
+        load_raster(catalog, sl, max_open_workers=4)
+        assert len(seen_threads) > 1
+
+    def test_failed_open_closes_other_handles(
+        self, utm29_tile_factory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        catalog, sl = self._four_tile_setup(utm29_tile_factory)
+        opened: list = []
+        original_open = raster_module.rasterio.open
+        calls = {"n": 0}
+
+        def flaky_open(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise OSError("synthetic open failure")
+            handle = original_open(*args, **kwargs)
+            opened.append(handle)
+            return handle
+
+        monkeypatch.setattr(raster_module.rasterio, "open", flaky_open)
+        with pytest.raises(OSError, match="synthetic open failure"):
+            load_raster(catalog, sl, max_open_workers=4, retries=0)
+        assert opened  # some files did open before the failure...
+        assert all(h.closed for h in opened)  # ...and all were closed
+
+    def test_aload_raster_parity(self, utm29_tile_factory) -> None:
+        import asyncio
+
+        from geocatalog import aload_raster
+
+        catalog, sl = self._four_tile_setup(utm29_tile_factory)
+        sync_tensor = load_raster(catalog, sl)
+        async_tensor = asyncio.run(aload_raster(catalog, sl, concurrency=4))
+        np.testing.assert_array_equal(sync_tensor.values, async_tensor.values)
+        assert sync_tensor.transform == async_tensor.transform

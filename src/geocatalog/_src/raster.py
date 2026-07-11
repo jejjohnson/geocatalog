@@ -476,6 +476,7 @@ def load_raster(
     merge_method: _RasterMergeMethod = "last",
     nodata: float | None = None,
     retries: int = 3,
+    max_open_workers: int = 8,
     storage_options: dict[str, Any] | None = None,
 ) -> GeoTensor:
     """Read + mosaic the catalog rows matching ``slice_`` into one `GeoTensor`.
@@ -505,6 +506,13 @@ def load_raster(
             respects each source's declared ``_FillValue`` / ``nodata``.
         retries: Number of retries for transient remote I/O failures.
             ``0`` disables retry/backoff.
+        max_open_workers: Thread-pool width for the file-*open* phase.
+            Remote (S3/HTTP) opens are latency-bound metadata round
+            trips and rasterio releases the GIL during them, so opening
+            concurrently cuts the open phase from ``N x latency`` to
+            ``ceil(N / workers) x latency``. The effective width is
+            ``min(max_open_workers, n_files)``; ``1`` (or ``0``) keeps
+            the serial behaviour. The merge phase is unchanged.
         storage_options: Options forwarded to fsspec for cloud/HTTP URIs
             (e.g. ``{"anon": True}`` for public S3). ``None`` uses fsspec
             defaults / GDAL's native VSI handling for ``s3://``-style paths.
@@ -532,16 +540,47 @@ def load_raster(
         raise ValueError("load_raster: no catalog rows match the slice")
 
     resampling = resampling or Resampling.bilinear
-    sources = []
+    filepaths = filtered.gdf["filepath"].tolist()
+
+    def _open_one(fp: str) -> tuple[Any, Any]:
+        resolved = _resolve_uri(fp, storage_options=storage_options)
+        try:
+            src = retry_transient_io(rasterio.open, resolved, retries=retries)
+        except BaseException:
+            _close_resolved_uri(resolved)
+            raise
+        return resolved, src
+
     handles = []
     resolved_handles = []
     try:
-        for fp in filtered.gdf["filepath"].tolist():
-            resolved = _resolve_uri(fp, storage_options=storage_options)
-            resolved_handles.append(resolved)
-            src = retry_transient_io(rasterio.open, resolved, retries=retries)
-            handles.append(src)
-            sources.append(src)
+        n_workers = max(1, min(max_open_workers, len(filepaths)))
+        if n_workers == 1:
+            for fp in filepaths:
+                resolved, src = _open_one(fp)
+                resolved_handles.append(resolved)
+                handles.append(src)
+        else:
+            with ThreadPoolExecutor(max_workers=n_workers) as executor:
+                # Submit in row order and consume in the same order so
+                # order-sensitive merge methods ("first" / "last") see
+                # the same source sequence as the serial path. Track
+                # every successfully opened handle even when an earlier
+                # file failed, so the `finally` below closes them all.
+                futures = [executor.submit(_open_one, fp) for fp in filepaths]
+                first_exc: BaseException | None = None
+                for future in futures:
+                    try:
+                        resolved, src = future.result()
+                    except BaseException as exc:
+                        if first_exc is None:
+                            first_exc = exc
+                        continue
+                    resolved_handles.append(resolved)
+                    handles.append(src)
+                if first_exc is not None:
+                    raise first_exc
+        sources = list(handles)
         target_resolution = slice_.resolution
         merged, transform = rio_merge(
             sources,
@@ -564,6 +603,42 @@ def load_raster(
         transform=transform,
         crs=slice_.crs,
         fill_value_default=nodata if nodata is not None else 0,
+    )
+
+
+async def aload_raster(
+    catalog: InMemoryGeoCatalog,
+    slice_: GeoSlice,
+    *,
+    band_indexes: Sequence[int] | None = None,
+    resampling: Any | None = None,
+    merge_method: _RasterMergeMethod = "last",
+    nodata: float | None = None,
+    retries: int = 3,
+    concurrency: int = 8,
+    storage_options: dict[str, Any] | None = None,
+) -> GeoTensor:
+    """Async mirror of `load_raster` for event-loop consumers.
+
+    Runs `load_raster` in a worker thread via `asyncio.to_thread` so the
+    event loop stays responsive during rasterio I/O (which releases the
+    GIL), with the file-open phase parallelised to ``concurrency``
+    threads inside the worker. Same arguments and return value as
+    `load_raster`; ``concurrency`` maps to ``max_open_workers``.
+    """
+    return await asyncio.to_thread(
+        functools.partial(
+            load_raster,
+            catalog,
+            slice_,
+            band_indexes=band_indexes,
+            resampling=resampling,
+            merge_method=merge_method,
+            nodata=nodata,
+            retries=retries,
+            max_open_workers=concurrency,
+            storage_options=storage_options,
+        )
     )
 
 

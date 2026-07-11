@@ -19,8 +19,9 @@ from typing import Any, Literal
 import geopandas as gpd
 import pandas as pd
 import pyarrow.parquet as pq
+from loguru import logger as log
 
-from geocatalog._src.base import CatalogSchemaError
+from geocatalog._src.base import CatalogMetadataError, CatalogSchemaError
 from geocatalog._src.io import _close_resolved_uri, _resolve_uri
 from geocatalog._src.memory import InMemoryGeoCatalog
 from geocatalog._src.retry import retry_transient_io
@@ -220,6 +221,8 @@ def to_geoparquet(
 def from_geoparquet(
     path: str | Path,
     *,
+    backend: _BACKEND_T | None = None,
+    strict: bool = False,
     retries: int = 3,
     storage_options: dict[str, Any] | None = None,
 ) -> InMemoryGeoCatalog:
@@ -242,6 +245,12 @@ def from_geoparquet(
     Args:
         path: Path to a GeoParquet file produced by `to_geoparquet`,
             DuckDB's ``COPY ... TO``, or any GeoParquet 1.x writer.
+        backend: Loader dispatch tag override. ``None`` reads the
+            reserved ``_backend`` column; an explicit value skips tag
+            recovery entirely (no warning, no strict raise).
+        strict: If ``True`` and neither ``backend=`` nor a ``_backend``
+            column is available, raise `CatalogMetadataError` instead of
+            defaulting to ``"raster"`` with a warning.
         retries: Number of retries for transient remote I/O failures.
             ``0`` disables retry/backoff.
         storage_options: Options forwarded to fsspec for cloud/HTTP URIs
@@ -255,6 +264,8 @@ def from_geoparquet(
     Raises:
         CatalogSchemaError: If the artifact's `_schema_version` exceeds
             `SCHEMA_VERSION_CURRENT`.
+        CatalogMetadataError: ``strict=True`` and the artifact has no
+            ``_backend`` column (and no ``backend=`` override).
     """
     # Read the version *first* via a column-selective parquet load so
     # we can reject a v_future / multi-version artifact before paying
@@ -289,10 +300,22 @@ def from_geoparquet(
             name="datetime",
         )
         gdf = gdf.set_index(idx)
-    if backend_col is not None and len(backend_col) > 0:
-        backend: _BACKEND_T = backend_col.iloc[0]
-    else:
-        backend = "raster"
+    if backend is None:
+        if backend_col is not None and len(backend_col) > 0:
+            backend = backend_col.iloc[0]
+        elif strict:
+            raise CatalogMetadataError(
+                f"{Path(path)} is missing the reserved '_backend' column. "
+                "Pass backend=... explicitly, or write the catalog via "
+                "geocatalog's to_geoparquet first."
+            )
+        else:
+            log.warning(
+                "opened {!r}: no _backend column found; defaulting to "
+                "backend='raster'. Pass backend=... explicitly to silence.",
+                str(path),
+            )
+            backend = "raster"
     return InMemoryGeoCatalog(gdf, backend=backend)
 
 

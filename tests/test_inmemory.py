@@ -262,6 +262,36 @@ class TestSetAlgebra:
 
         assert len(left.intersect(right)) == 0
 
+    def test_intersect_cardinality_symmetric_on_sliver_overlap(self) -> None:
+        # Regression for gh #40: GEOS intersection is order-sensitive on
+        # near-degenerate sliver overlaps (Polygon one way, empty the
+        # other). The Hypothesis falsifying example reduced to this pair:
+        # the overlap is a sliver ~4e-165 degrees wide.
+        left = _build(
+            [
+                {
+                    "geometry": shapely.geometry.box(-1, -6.5, 0, 0),
+                    "start_time": pd.Timestamp("2000-01-01"),
+                    "end_time": pd.Timestamp("2000-01-01"),
+                    "filepath": "left.tif",
+                },
+            ]
+        )
+        right = _build(
+            [
+                {
+                    "geometry": shapely.geometry.box(
+                        -3.8005323668172852e-165, -3, 1.875, 1.8113965363604467e-218
+                    ),
+                    "start_time": pd.Timestamp("2000-01-01"),
+                    "end_time": pd.Timestamp("2000-01-01"),
+                    "filepath": "right.tif",
+                },
+            ]
+        )
+
+        assert len(left.intersect(right)) == len(right.intersect(left))
+
     def test_intersect_rejects_unknown_engine(
         self, two_tile_catalog: InMemoryGeoCatalog
     ) -> None:

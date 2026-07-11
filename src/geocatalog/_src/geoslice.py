@@ -215,8 +215,15 @@ class GeoSlice:
 
         The resolution is conservatively rescaled by the ratio of the
         projected-vs-source bbox widths so the output ``shape`` stays
-        roughly stable. Antimeridian-crossing reprojections are not
-        handled — split the slice first.
+        roughly stable.
+
+        Raises:
+            NotImplementedError: The reprojection produces a degenerate
+                or non-finite box — a pole-wrapping, antimeridian-adjacent,
+                or out-of-domain transform. Split or clip the slice first.
+                (Antimeridian-*crossing* input bounds are already rejected
+                at construction: ``__post_init__`` requires
+                ``xmin < xmax``.)
         """
         target = (
             target_crs
@@ -225,9 +232,19 @@ class GeoSlice:
         )
         if target == self.crs:
             return self
-        transformer = pyproj.Transformer.from_crs(self.crs, target, always_xy=True)
         xmin, ymin, xmax, ymax = self.bounds
+        transformer = pyproj.Transformer.from_crs(self.crs, target, always_xy=True)
         new_bounds = transformer.transform_bounds(xmin, ymin, xmax, ymax)
+        if not all(np.isfinite(b) for b in new_bounds) or not (
+            new_bounds[0] < new_bounds[2] and new_bounds[1] < new_bounds[3]
+        ):
+            raise NotImplementedError(
+                f"GeoSlice.to_crs produced a degenerate box reprojecting "
+                f"bounds={self.bounds} from {self.crs} to {target}: got "
+                f"{tuple(new_bounds)}. This usually means the bounds wrap a "
+                f"pole or leave the target CRS's domain — split or clip the "
+                f"slice first."
+            )
         # Preserve output shape: scale resolution by the bbox width ratio.
         old_w = xmax - xmin
         new_w = new_bounds[2] - new_bounds[0]
