@@ -962,3 +962,37 @@ class TestIterRowsStreaming:
         cat = DuckDBGeoCatalog.open(parquet_two_tiles)
         with pytest.raises(ValueError, match="batch_size"):
             next(cat.iter_rows(batch_size=0))
+
+
+class TestIntersectSymmetryDuckDB:
+    """The gh #40 canonical-order fix applies to the SQL engine too."""
+
+    @staticmethod
+    def _sliver_pair() -> tuple[DuckDBGeoCatalog, DuckDBGeoCatalog]:
+        def one(box: shapely.geometry.base.BaseGeometry, fp: str) -> DuckDBGeoCatalog:
+            gdf = gpd.GeoDataFrame(
+                {
+                    "geometry": [box],
+                    "start_time": [pd.Timestamp("2000-01-01")],
+                    "end_time": [pd.Timestamp("2000-01-01")],
+                    "filepath": [fp],
+                },
+                geometry="geometry",
+                crs="EPSG:4326",
+            )
+            return DuckDBGeoCatalog.from_memory(
+                InMemoryGeoCatalog(gdf, backend="raster")
+            )
+
+        left = one(shapely.geometry.box(-1, -6.5, 0, 0), "left.tif")
+        right = one(
+            shapely.geometry.box(
+                -3.8005323668172852e-165, -3, 1.875, 1.8113965363604467e-218
+            ),
+            "right.tif",
+        )
+        return left, right
+
+    def test_sliver_overlap_cardinality_symmetric(self) -> None:
+        left, right = self._sliver_pair()
+        assert len(left.intersect(right)) == len(right.intersect(left))

@@ -345,8 +345,10 @@ class DuckDBGeoCatalog:
                 falling back when the ``_backend`` column is missing /
                 unreadable (and ``backend=`` was not passed) or the
                 GeoParquet ``geo`` metadata is unreadable (and ``crs=``
-                was not passed). Explicit ``backend=`` / ``crs=``
-                overrides bypass the corresponding check.
+                was not passed). Remote URIs cannot be introspected at
+                all, so ``strict=True`` requires an explicit ``crs=``
+                for them. Explicit ``backend=`` / ``crs=`` overrides
+                bypass the corresponding check.
 
         Returns:
             A `DuckDBGeoCatalog` over the relation.
@@ -372,6 +374,12 @@ class DuckDBGeoCatalog:
                 con.execute("INSTALL azure")
                 con.execute("LOAD azure")
             if crs is None:
+                if scheme is not None and strict:
+                    raise CatalogMetadataError(
+                        f"cannot auto-detect CRS from remote URI {source_str}: "
+                        "GeoParquet metadata introspection only works for "
+                        "local files. Pass crs= explicitly when strict=True."
+                    )
                 if scheme is not None:
                     warnings.warn(
                         f"DuckDBGeoCatalog.open({source_str!r}): cannot auto-detect "
@@ -632,10 +640,19 @@ class DuckDBGeoCatalog:
                 "LEAST   (L.end_time,   R.end_time)   AS end_time"
             )
         )
+        # GEOS intersection is not bit-symmetric under operand order for
+        # near-degenerate sliver overlaps (gh #40) — canonicalise each
+        # pair's operand order by WKB bytes, mirroring the in-memory
+        # engine's `_symmetric_intersection`, so `a.intersect(b)` and
+        # `b.intersect(a)` compute identical geometry per row pair.
         sql = f"""
             SELECT
                 L.filepath AS filepath,
-                ST_Intersection(L.geometry, R.geometry) AS geometry,
+                CASE
+                    WHEN ST_AsWKB(L.geometry) > ST_AsWKB(R.geometry)
+                        THEN ST_Intersection(R.geometry, L.geometry)
+                    ELSE ST_Intersection(L.geometry, R.geometry)
+                END AS geometry,
                 {time_select}
             FROM {left_name} AS L
             JOIN {right_name} AS R
@@ -1005,7 +1022,10 @@ def _read_geoparquet_crs(
         geo_meta = json.loads(geo.decode())
         primary = geo_meta.get("primary_column", "geometry")
         crs_val = geo_meta.get("columns", {}).get(primary, {}).get("crs")
-    except (ValueError, KeyError) as exc:
+    except (ValueError, KeyError, AttributeError, TypeError) as exc:
+        # ValueError covers json.JSONDecodeError and UnicodeDecodeError;
+        # AttributeError/TypeError cover structurally valid JSON whose
+        # `columns` / primary-column entries aren't mappings.
         if strict:
             raise CatalogMetadataError(
                 f"malformed GeoParquet 'geo' metadata in {path}: {exc}. "
@@ -1174,12 +1194,37 @@ def _read_backend_tag(
         _cache_backend_tag(con, source, default)
         return default
     if len(df) == 0 or pd.isna(df["_backend"].iloc[0]):
+        if strict:
+            raise CatalogMetadataError(
+                f"{source} has a '_backend' column but no readable value "
+                "(empty artifact or null tag). Pass backend=... explicitly, "
+                "or fix the source."
+            )
+        log.warning(
+            "opened {!r}: _backend column present but empty/null; defaulting "
+            "to backend={!r}. Pass backend=... explicitly to silence.",
+            source,
+            default,
+        )
         _cache_backend_tag(con, source, default)
         return default
     tag = str(df["_backend"].iloc[0])
     if tag in ("raster", "xarray", "vector"):
         _cache_backend_tag(con, source, cast(_BACKEND_T, tag))
         return cast(_BACKEND_T, tag)
+    if strict:
+        raise CatalogMetadataError(
+            f"{source} carries an unrecognised _backend tag {tag!r}; expected "
+            "'raster', 'xarray', or 'vector'. Pass backend=... explicitly, "
+            "or fix the source."
+        )
+    log.warning(
+        "opened {!r}: unrecognised _backend tag {!r}; defaulting to "
+        "backend={!r}. Pass backend=... explicitly to silence.",
+        source,
+        tag,
+        default,
+    )
     _cache_backend_tag(con, source, default)
     return default
 

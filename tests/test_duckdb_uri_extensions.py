@@ -20,9 +20,13 @@ class _FakeRelation:
 class _FakeConnection:
     def __init__(self) -> None:
         self.commands: list[str] = []
+        self.closed = False
 
     def execute(self, command: str) -> None:
         self.commands.append(command)
+
+    def close(self) -> None:
+        self.closed = True
 
     def sql(self, query: str, *, params: dict[str, Any]) -> _FakeRelation:
         return _FakeRelation()
@@ -154,3 +158,20 @@ def test_open_loads_extension_for_supported_uri_schemes(
         *extension_commands,
     ]
     assert captured_source == [str(source)]
+
+
+def test_strict_remote_uri_without_crs_raises(fake_duckdb: _FakeConnection) -> None:
+    """strict=True can't silently default CRS for URIs it can't introspect."""
+    from geocatalog import CatalogMetadataError
+
+    with pytest.raises(CatalogMetadataError, match="Pass crs="):
+        DuckDBGeoCatalog.open("s3://bucket/cat.parquet", strict=True)
+
+
+def test_strict_remote_uri_with_explicit_crs_opens(
+    fake_duckdb: _FakeConnection,
+) -> None:
+    cat = DuckDBGeoCatalog.open(
+        "s3://bucket/cat.parquet", crs="EPSG:32629", strict=True
+    )
+    assert cat.crs == "EPSG:32629"

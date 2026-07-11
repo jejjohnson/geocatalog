@@ -173,3 +173,99 @@ class TestCrsMetadataReader:
         bad.write_bytes(b"this is not parquet")
         with pytest.raises(CatalogMetadataError, match="Parquet metadata"):
             _read_geoparquet_crs(bad, default="EPSG:4326", strict=True)
+
+
+def _tagged_parquet(tmp_path: Path, tag: object) -> Path:
+    """A parquet whose ``_backend`` column carries an arbitrary tag value."""
+    gdf = gpd.GeoDataFrame(
+        {
+            "geometry": [shapely.geometry.box(0, 0, 100, 100)],
+            "start_time": [pd.Timestamp("2024-01-01")],
+            "end_time": [pd.Timestamp("2024-01-02")],
+            "filepath": ["A.tif"],
+            "_backend": [tag],
+        },
+        geometry="geometry",
+        crs="EPSG:32629",
+    )
+    path = tmp_path / "tagged.parquet"
+    gdf.to_parquet(path)
+    return path
+
+
+class TestCorruptBackendTag:
+    def test_unrecognised_tag_warns_and_defaults(
+        self, tmp_path: Path, loguru_sink: io.StringIO
+    ) -> None:
+        pytest.importorskip("duckdb")
+        from geocatalog import DuckDBGeoCatalog
+
+        cat = DuckDBGeoCatalog.open(_tagged_parquet(tmp_path, "vecotr"))
+        assert cat.backend == "raster"
+        assert "unrecognised _backend tag 'vecotr'" in loguru_sink.getvalue()
+
+    def test_unrecognised_tag_strict_raises(self, tmp_path: Path) -> None:
+        pytest.importorskip("duckdb")
+        from geocatalog import DuckDBGeoCatalog
+
+        with pytest.raises(CatalogMetadataError, match="unrecognised _backend tag"):
+            DuckDBGeoCatalog.open(_tagged_parquet(tmp_path, "vecotr"), strict=True)
+
+    def test_null_tag_strict_raises(self, tmp_path: Path) -> None:
+        pytest.importorskip("duckdb")
+        from geocatalog import DuckDBGeoCatalog
+
+        with pytest.raises(CatalogMetadataError, match="no readable value"):
+            DuckDBGeoCatalog.open(_tagged_parquet(tmp_path, None), strict=True)
+
+    def test_bad_tag_with_explicit_backend_bypasses(self, tmp_path: Path) -> None:
+        pytest.importorskip("duckdb")
+        from geocatalog import DuckDBGeoCatalog
+
+        cat = DuckDBGeoCatalog.open(
+            _tagged_parquet(tmp_path, "vecotr"), backend="vector", strict=True
+        )
+        assert cat.backend == "vector"
+
+
+class TestMalformedGeoMetadataShapes:
+    @staticmethod
+    def _parquet_with_geo(tmp_path: Path, geo_bytes: bytes) -> Path:
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        table = pa.table({"x": [1, 2]})
+        table = table.replace_schema_metadata({b"geo": geo_bytes})
+        path = tmp_path / "weird_geo.parquet"
+        pq.write_table(table, path)
+        return path
+
+    def test_non_mapping_geo_json_warns_and_defaults(
+        self, tmp_path: Path, loguru_sink: io.StringIO
+    ) -> None:
+        pytest.importorskip("duckdb")
+        from geocatalog._src.duckdb_backend import _read_geoparquet_crs
+
+        path = self._parquet_with_geo(tmp_path, b"[1, 2, 3]")
+        assert _read_geoparquet_crs(path, default="EPSG:4326") == "EPSG:4326"
+        assert "malformed GeoParquet 'geo' metadata" in loguru_sink.getvalue()
+
+    def test_non_mapping_columns_entry_strict_raises(self, tmp_path: Path) -> None:
+        pytest.importorskip("duckdb")
+        from geocatalog._src.duckdb_backend import _read_geoparquet_crs
+
+        path = self._parquet_with_geo(
+            tmp_path, b'{"primary_column": "geometry", "columns": ["geometry"]}'
+        )
+        with pytest.raises(CatalogMetadataError, match="malformed GeoParquet"):
+            _read_geoparquet_crs(path, default="EPSG:4326", strict=True)
+
+    def test_invalid_utf8_geo_warns_and_defaults(
+        self, tmp_path: Path, loguru_sink: io.StringIO
+    ) -> None:
+        pytest.importorskip("duckdb")
+        from geocatalog._src.duckdb_backend import _read_geoparquet_crs
+
+        path = self._parquet_with_geo(tmp_path, b"\xff\xfe{not json}")
+        assert _read_geoparquet_crs(path, default="EPSG:4326") == "EPSG:4326"
+        assert "malformed GeoParquet 'geo' metadata" in loguru_sink.getvalue()
