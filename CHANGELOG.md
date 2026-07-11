@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.4](https://github.com/jejjohnson/geocatalog/compare/v0.0.3...v0.0.4) (2026-07-11)
+
+
+### Features
+
+* strict metadata mode, Arrow-streaming rows, concurrent opens ([#69](https://github.com/jejjohnson/geocatalog/issues/69)) ([13c60b0](https://github.com/jejjohnson/geocatalog/commit/13c60b032b4181f7a88561173a8f9f6a15bc4187))
+
 ## [0.0.3](https://github.com/jejjohnson/geocatalog/compare/v0.0.2...v0.0.3) (2026-06-09)
 
 
