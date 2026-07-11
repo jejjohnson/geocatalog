@@ -123,3 +123,49 @@ class TestSliceWindowRoundtrip:
             slice_4326.resolution,
         )
         np.testing.assert_allclose(recovered.bounds, slice_4326.bounds, atol=1e-9)
+
+
+class TestToCrsDegenerateGuards:
+    """`to_crs` refuses pathological reprojections loudly (gh #16)."""
+
+    def test_out_of_domain_reprojection_raises(self) -> None:
+        # An AOI on the invisible hemisphere of a geostationary grid
+        # (GOES / Meteosat style) reprojects to (inf, inf, inf, inf).
+        sl = GeoSlice(
+            bounds=(150.0, -10.0, 170.0, 10.0),
+            interval=pd.Interval(
+                pd.Timestamp("2024-01-01"), pd.Timestamp("2024-01-02"), closed="both"
+            ),
+            resolution=(0.1, 0.1),
+            crs="EPSG:4326",
+        )
+        with pytest.raises(NotImplementedError, match="degenerate box"):
+            sl.to_crs("+proj=geos +h=35785831 +lon_0=0")
+
+    def test_antimeridian_crossing_bounds_rejected_at_construction(self) -> None:
+        # The other half of gh #16: wrap-around bounds can't even be
+        # constructed, so to_crs never sees them.
+        with pytest.raises(ValueError, match="xmin < xmax"):
+            GeoSlice(
+                bounds=(170.0, -10.0, -170.0, 10.0),
+                interval=pd.Interval(
+                    pd.Timestamp("2024-01-01"),
+                    pd.Timestamp("2024-01-02"),
+                    closed="both",
+                ),
+                resolution=(0.1, 0.1),
+                crs="EPSG:4326",
+            )
+
+    def test_happy_path_reprojection_unchanged(self) -> None:
+        sl = GeoSlice(
+            bounds=(-3.8, 40.3, -3.6, 40.5),
+            interval=pd.Interval(
+                pd.Timestamp("2024-01-01"), pd.Timestamp("2024-01-02"), closed="both"
+            ),
+            resolution=(0.001, 0.001),
+            crs="EPSG:4326",
+        )
+        out = sl.to_crs("EPSG:3857")
+        assert out.crs.to_epsg() == 3857
+        assert out.bounds[0] < out.bounds[2] and out.bounds[1] < out.bounds[3]

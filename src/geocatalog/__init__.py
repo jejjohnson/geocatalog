@@ -50,7 +50,12 @@ from geocatalog._src._align import (
     divide_evenly,
     is_grid_aligned,
 )
-from geocatalog._src.base import CatalogRow, CatalogSchemaError, GeoCatalog
+from geocatalog._src.base import (
+    CatalogMetadataError,
+    CatalogRow,
+    CatalogSchemaError,
+    GeoCatalog,
+)
 from geocatalog._src.bundle import CatalogBundle, QueryRecord, source_row_to_gdf_row
 from geocatalog._src.domain import CatalogDomain
 from geocatalog._src.factory import open_catalog
@@ -82,6 +87,7 @@ from geocatalog._src.parquet import (
     to_geoparquet,
 )
 from geocatalog._src.raster import (
+    aload_raster,
     build_raster_catalog,
     load_raster,
     load_raster_timeseries,
@@ -125,6 +131,7 @@ __all__ = [
     "CMRSource",
     "CatalogBundle",
     "CatalogDomain",
+    "CatalogMetadataError",
     "CatalogRow",
     "CatalogSchemaError",
     "CentroidWithin",
@@ -149,6 +156,7 @@ __all__ = [
     "Synchronous",
     "TemporalStrategy",
     "WithinWindow",
+    "aload_raster",
     "append_files",
     "build_raster_catalog",
     "build_vector_catalog",

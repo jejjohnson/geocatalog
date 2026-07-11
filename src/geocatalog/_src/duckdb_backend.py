@@ -41,7 +41,7 @@ from loguru import logger as log
 if TYPE_CHECKING:
     import duckdb as duckdb_mod
 
-from geocatalog._src.base import RESERVED_COLUMNS, CatalogRow
+from geocatalog._src.base import RESERVED_COLUMNS, CatalogMetadataError, CatalogRow
 from geocatalog._src.geoslice import GeoSlice
 from geocatalog._src.memory import (
     InMemoryGeoCatalog,
@@ -298,6 +298,7 @@ class DuckDBGeoCatalog:
         crs: Any | None = None,
         retries: int = 3,
         storage_options: dict[str, Any] | None = None,
+        strict: bool = False,
     ) -> DuckDBGeoCatalog:
         """Open a GeoParquet file (or directory of shards) lazily.
 
@@ -340,6 +341,14 @@ class DuckDBGeoCatalog:
                 ``None``; configure DuckDB secrets (or pre-set env vars)
                 before calling `open`. Use ``engine='memory'`` if you need
                 fsspec-backed reads.
+            strict: If ``True``, raise `CatalogMetadataError` instead of
+                falling back when the ``_backend`` column is missing /
+                unreadable (and ``backend=`` was not passed) or the
+                GeoParquet ``geo`` metadata is unreadable (and ``crs=``
+                was not passed). Remote URIs cannot be introspected at
+                all, so ``strict=True`` requires an explicit ``crs=``
+                for them. Explicit ``backend=`` / ``crs=`` overrides
+                bypass the corresponding check.
 
         Returns:
             A `DuckDBGeoCatalog` over the relation.
@@ -365,6 +374,12 @@ class DuckDBGeoCatalog:
                 con.execute("INSTALL azure")
                 con.execute("LOAD azure")
             if crs is None:
+                if scheme is not None and strict:
+                    raise CatalogMetadataError(
+                        f"cannot auto-detect CRS from remote URI {source_str}: "
+                        "GeoParquet metadata introspection only works for "
+                        "local files. Pass crs= explicitly when strict=True."
+                    )
                 if scheme is not None:
                     warnings.warn(
                         f"DuckDBGeoCatalog.open({source_str!r}): cannot auto-detect "
@@ -378,6 +393,7 @@ class DuckDBGeoCatalog:
                     _read_geoparquet_crs,
                     source,
                     default="EPSG:4326",
+                    strict=strict,
                     retries=retries,
                 )
             if backend is None:
@@ -387,6 +403,7 @@ class DuckDBGeoCatalog:
                     source_str,
                     default="raster",
                     partitioned=partitioned,
+                    strict=strict,
                     retries=retries,
                 )
             retry_transient_io(
@@ -623,10 +640,19 @@ class DuckDBGeoCatalog:
                 "LEAST   (L.end_time,   R.end_time)   AS end_time"
             )
         )
+        # GEOS intersection is not bit-symmetric under operand order for
+        # near-degenerate sliver overlaps (gh #40) — canonicalise each
+        # pair's operand order by WKB bytes, mirroring the in-memory
+        # engine's `_symmetric_intersection`, so `a.intersect(b)` and
+        # `b.intersect(a)` compute identical geometry per row pair.
         sql = f"""
             SELECT
                 L.filepath AS filepath,
-                ST_Intersection(L.geometry, R.geometry) AS geometry,
+                CASE
+                    WHEN ST_AsWKB(L.geometry) > ST_AsWKB(R.geometry)
+                        THEN ST_Intersection(R.geometry, L.geometry)
+                    ELSE ST_Intersection(L.geometry, R.geometry)
+                END AS geometry,
                 {time_select}
             FROM {left_name} AS L
             JOIN {right_name} AS R
@@ -671,43 +697,61 @@ class DuckDBGeoCatalog:
         return self._derive(unioned)
 
     def iter_rows(self, *, batch_size: int = 1024) -> Iterator[CatalogRow]:
-        """Stream rows as `CatalogRow` instances.
+        """Stream rows as `CatalogRow` instances in Arrow batches.
 
-        Materialises the relation once via `.df()`, then yields rows
-        one at a time. ``batch_size`` is currently advisory — DuckDB's
-        Python API materialises in one chunk; we may switch to
-        `.fetchmany()` if streaming benchmarks demand it.
+        Streams the relation through DuckDB's Arrow record-batch reader,
+        so time-to-first-row and peak memory are ``O(batch_size)`` —
+        not ``O(len(catalog))`` as the previous ``.df()``-materialising
+        implementation was. Geometry WKB is decoded one vectorised
+        `shapely.from_wkb` call per batch.
 
         Args:
-            batch_size: Advisory batch size. Currently unused.
+            batch_size: Rows per Arrow record batch. Bounds both the
+                first-row latency and the peak memory of a full
+                iteration.
 
         Yields:
             `CatalogRow` with ``geometry`` decoded from WKB.
         """
         self._require_open_con()
-        del batch_size
-        df = self.relation.df()
-        if len(df) == 0:
-            return
-        geoms = _decode_geometry_column(df["geometry"])
-        starts = pd.to_datetime(df["start_time"])
-        ends = pd.to_datetime(df["end_time"])
-        # `_backend`, `_schema_version` and any other underscore-prefixed
-        # column belong to the on-disk schema, not the user-visible row
-        # metadata. Filtering them keeps `extras` clean for downstream
-        # loaders that introspect it.
-        extra_cols = [
-            c for c in df.columns if c not in RESERVED_COLUMNS and not c.startswith("_")
-        ]
-        for i in range(len(df)):
-            extras = {c: df[c].iloc[i] for c in extra_cols}
-            yield CatalogRow(
-                filepath=str(df["filepath"].iloc[i]),
-                geometry=geoms[i],
-                interval=pd.Interval(starts.iloc[i], ends.iloc[i], closed="both"),
-                crs=self.crs,
-                extras=extras,
-            )
+        if batch_size < 1:
+            raise ValueError(f"batch_size must be >= 1; got {batch_size}")
+        for batch in self._arrow_reader(batch_size):
+            df = batch.to_pandas()
+            if len(df) == 0:
+                continue
+            geoms = _decode_geometry_column(df["geometry"])
+            starts = pd.to_datetime(df["start_time"])
+            ends = pd.to_datetime(df["end_time"])
+            # `_backend`, `_schema_version` and any other underscore-prefixed
+            # column belong to the on-disk schema, not the user-visible row
+            # metadata. Filtering them keeps `extras` clean for downstream
+            # loaders that introspect it.
+            extra_cols = [
+                c
+                for c in df.columns
+                if c not in RESERVED_COLUMNS and not c.startswith("_")
+            ]
+            for i in range(len(df)):
+                extras = {c: df[c].iloc[i] for c in extra_cols}
+                yield CatalogRow(
+                    filepath=str(df["filepath"].iloc[i]),
+                    geometry=geoms[i],
+                    interval=pd.Interval(starts.iloc[i], ends.iloc[i], closed="both"),
+                    crs=self.crs,
+                    extras=extras,
+                )
+
+    def _arrow_reader(self, batch_size: int) -> Any:
+        """Record-batch reader over the relation, across DuckDB versions.
+
+        ``to_arrow_reader`` is the current API; ``fetch_arrow_reader``
+        is its deprecated pre-1.x-series spelling.
+        """
+        to_reader = getattr(self.relation, "to_arrow_reader", None)
+        if to_reader is not None:
+            return to_reader(batch_size)
+        return self.relation.fetch_arrow_reader(batch_size)
 
     def iter_slices(self, *, resolution: tuple[float, float]) -> Iterator[GeoSlice]:
         """Yield one `GeoSlice` per row at the given target resolution.
@@ -915,7 +959,9 @@ def _gdf_to_arrow_df(gdf: gpd.GeoDataFrame) -> pd.DataFrame:
     return df
 
 
-def _read_geoparquet_crs(source: str | Path, *, default: str) -> Any:
+def _read_geoparquet_crs(
+    source: str | Path, *, default: str, strict: bool = False
+) -> Any:
     """Pull the catalog CRS out of a GeoParquet file's column metadata.
 
     GeoParquet stores CRS as PROJJSON inside the ``geo`` key of the
@@ -956,6 +1002,11 @@ def _read_geoparquet_crs(source: str | Path, *, default: str) -> Any:
         # A corrupt or unreadable shard shouldn't silently masquerade as
         # EPSG:4326 without a trace — surface the reason at WARNING so
         # operators can tell "no geo metadata" apart from "broken file".
+        if strict:
+            raise CatalogMetadataError(
+                f"could not read Parquet metadata from {path}: {exc}. "
+                "Pass crs=... explicitly, or fix the source."
+            ) from exc
         log.warning(
             "duckdb backend: could not read Parquet metadata from {!r} "
             "({}); falling back to {}",
@@ -971,11 +1022,41 @@ def _read_geoparquet_crs(source: str | Path, *, default: str) -> Any:
         geo_meta = json.loads(geo.decode())
         primary = geo_meta.get("primary_column", "geometry")
         crs_val = geo_meta.get("columns", {}).get(primary, {}).get("crs")
-    except (ValueError, KeyError):
+    except (ValueError, KeyError, AttributeError, TypeError) as exc:
+        # ValueError covers json.JSONDecodeError and UnicodeDecodeError;
+        # AttributeError/TypeError cover structurally valid JSON whose
+        # `columns` / primary-column entries aren't mappings.
+        if strict:
+            raise CatalogMetadataError(
+                f"malformed GeoParquet 'geo' metadata in {path}: {exc}. "
+                "Pass crs=... explicitly, or fix the source."
+            ) from exc
+        log.warning(
+            "duckdb backend: malformed GeoParquet 'geo' metadata in {!r} "
+            "({}); falling back to {}",
+            str(path),
+            exc,
+            default,
+        )
         return default
     if crs_val is None:
         return default
-    return pyproj.CRS.from_user_input(crs_val)
+    try:
+        return pyproj.CRS.from_user_input(crs_val)
+    except pyproj.exceptions.CRSError as exc:
+        if strict:
+            raise CatalogMetadataError(
+                f"unparseable CRS in GeoParquet 'geo' metadata of {path}: "
+                f"{exc}. Pass crs=... explicitly, or fix the source."
+            ) from exc
+        log.warning(
+            "duckdb backend: unparseable CRS in GeoParquet 'geo' metadata "
+            "of {!r} ({}); falling back to {}",
+            str(path),
+            exc,
+            default,
+        )
+        return default
 
 
 def _check_schema_version(
@@ -1054,6 +1135,7 @@ def _read_backend_tag(
     *,
     default: _BACKEND_T,
     partitioned: bool = False,
+    strict: bool = False,
 ) -> _BACKEND_T:
     """Recover the ``_backend`` column written by `to_geoparquet`.
 
@@ -1080,20 +1162,69 @@ def _read_backend_tag(
         ).df()
     except dd.BinderException:
         # Missing `_backend` column — externally produced parquet.
+        if strict:
+            raise CatalogMetadataError(
+                f"{source} is missing the reserved '_backend' column. "
+                "Pass backend=... explicitly, or write the catalog via "
+                "geocatalog's to_geoparquet first."
+            ) from None
+        log.warning(
+            "opened {!r}: no _backend column found; defaulting to "
+            "backend={!r}. Pass backend=... explicitly to silence.",
+            source,
+            default,
+        )
         _cache_backend_tag(con, source, default)
         return default
-    except dd.IOException:
+    except dd.IOException as exc:
         # Unreadable parquet path; caller will hit a clearer error
         # on the next read.
+        if strict:
+            raise CatalogMetadataError(
+                f"could not read '_backend' column from {source}: {exc}. "
+                "Pass backend=... explicitly, or fix the source."
+            ) from exc
+        log.warning(
+            "opened {!r}: could not read _backend column ({}); defaulting "
+            "to backend={!r}. Pass backend=... explicitly to silence.",
+            source,
+            exc,
+            default,
+        )
         _cache_backend_tag(con, source, default)
         return default
     if len(df) == 0 or pd.isna(df["_backend"].iloc[0]):
+        if strict:
+            raise CatalogMetadataError(
+                f"{source} has a '_backend' column but no readable value "
+                "(empty artifact or null tag). Pass backend=... explicitly, "
+                "or fix the source."
+            )
+        log.warning(
+            "opened {!r}: _backend column present but empty/null; defaulting "
+            "to backend={!r}. Pass backend=... explicitly to silence.",
+            source,
+            default,
+        )
         _cache_backend_tag(con, source, default)
         return default
     tag = str(df["_backend"].iloc[0])
     if tag in ("raster", "xarray", "vector"):
         _cache_backend_tag(con, source, cast(_BACKEND_T, tag))
         return cast(_BACKEND_T, tag)
+    if strict:
+        raise CatalogMetadataError(
+            f"{source} carries an unrecognised _backend tag {tag!r}; expected "
+            "'raster', 'xarray', or 'vector'. Pass backend=... explicitly, "
+            "or fix the source."
+        )
+    log.warning(
+        "opened {!r}: unrecognised _backend tag {!r}; defaulting to "
+        "backend={!r}. Pass backend=... explicitly to silence.",
+        source,
+        tag,
+        default,
+    )
     _cache_backend_tag(con, source, default)
     return default
 
@@ -1196,8 +1327,17 @@ def _decode_geometry_column(col: pd.Series) -> list[Any]:
     `ST_GeomFromWKB`, then DuckDB hands the result back as a WKB blob
     too — we re-decode).
     """
+    values = col.to_numpy() if hasattr(col, "to_numpy") else list(col)
+    # Fast path: a homogeneous WKB column decodes in one vectorised
+    # shapely call (~50x faster than per-row `shapely.from_wkb`).
+    if len(values) > 0 and all(
+        isinstance(v, (bytes, bytearray, memoryview)) for v in values
+    ):
+        wkb = np.empty(len(values), dtype=object)
+        wkb[:] = [bytes(v) for v in values]
+        return list(shapely.from_wkb(wkb))
     out: list[Any] = []
-    for val in col:
+    for val in values:
         if val is None:
             out.append(None)
             continue

@@ -199,7 +199,7 @@ class InMemoryGeoCatalog:
                 left_array = _repair_invalid(left_geometry.to_numpy())
                 right_array = _repair_invalid(right_geometry.to_numpy())
                 clipped = gpd.GeoSeries(
-                    shapely.intersection(left_array, right_array),
+                    _symmetric_intersection(left_array, right_array),
                     index=joined.index,
                     crs=self.gdf.crs,
                 )
@@ -417,6 +417,29 @@ def _repair_invalid(geometries: np.ndarray) -> np.ndarray:
     repaired = geometries.copy()
     repaired[invalid_mask] = shapely.make_valid(geometries[invalid_mask])
     return repaired
+
+
+def _symmetric_intersection(left: np.ndarray, right: np.ndarray) -> np.ndarray:
+    """Pairwise ``shapely.intersection`` with a canonical operand order.
+
+    GEOS intersection is not bit-symmetric under operand order for
+    near-degenerate overlaps: a sliver a few ULPs wide can come back as
+    a `Polygon` for ``intersection(a, b)`` and as empty for
+    ``intersection(b, a)`` (gh #40). Ordering each pair canonically (by
+    WKB bytes) makes ``intersect(a, b)`` and ``intersect(b, a)`` compute
+    the same geometry for every row pair, so the result cardinality is
+    symmetric by construction.
+    """
+    left_wkb = shapely.to_wkb(left)
+    right_wkb = shapely.to_wkb(right)
+    swap = np.fromiter(
+        (lw > rw for lw, rw in zip(left_wkb, right_wkb, strict=True)),
+        dtype=bool,
+        count=len(left),
+    )
+    first = np.where(swap, right, left)
+    second = np.where(swap, left, right)
+    return shapely.intersection(first, second)
 
 
 def _keep_geom_type_mask(

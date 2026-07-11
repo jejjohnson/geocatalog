@@ -49,6 +49,17 @@ them out of ``extras`` and rewrite passes drop them before re-encoding
 """
 
 
+class CatalogMetadataError(ValueError):
+    """A catalog artifact's metadata could not be read or is missing.
+
+    Raised by the `strict=True` mode of the catalog `open` entry points
+    when a GeoParquet artifact lacks the reserved ``_backend`` column,
+    carries unreadable/malformed ``geo`` metadata, or its CRS cannot be
+    parsed — instead of the default behaviour of logging a warning and
+    falling back (``backend="raster"`` / ``crs="EPSG:4326"``).
+    """
+
+
 class CatalogSchemaError(ValueError):
     """A GeoParquet artifact has a `_schema_version` the reader can't load.
 
